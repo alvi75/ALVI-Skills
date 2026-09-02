@@ -257,7 +257,7 @@ elif [ "$LAYOUT" = meters ] && [ -f "$HOME/.claude/credit-config" ]; then
     # Credit (API-billing) auth: rate_limits is absent, so meter dollars instead.
     # No API returns a credit balance, so BALANCE is hand-entered and we subtract
     # spend measured since it was set.
-    BALANCE=0; BALANCE_AT=""
+    BALANCE=0; BALANCE_AT=""; CAL=1.0
     . "$HOME/.claude/credit-config" 2>/dev/null
 
     # Ledger of session_id -> that session's latest cost estimate. Summing the
@@ -346,7 +346,20 @@ elif [ "$LAYOUT" = meters ] && [ -f "$HOME/.claude/credit-config" ]; then
         ( "$HOME/.claude/credit-spend.sh" >/dev/null 2>&1 & ) 2>/dev/null
     fi
     # '~' marks any figure that is not a fresh billed number.
-    if [ -n "$BILLED" ]; then SPEND="$BILLED"; MARK=""; else SPEND="$LSUM"; MARK="~"; fi
+    #
+    # CAL corrects the estimate only. The transcript cannot see every billed
+    # call: the auto-mode classifier fires on each tool use and WebFetch
+    # summarizes each page with its own model call, and neither is logged.
+    # Measured over one full session: $34.14 actual against $24.93 visible,
+    # a 1.37x shortfall. ccredit re-learns CAL at every re-anchor, so it tracks
+    # a changing tool mix instead of trusting one session's ratio forever.
+    # A billed figure is already the truth and is never scaled.
+    if [ -n "$BILLED" ]; then
+        SPEND="$BILLED"; MARK=""
+    else
+        SPEND=$(awk -v s="$LSUM" -v c="$CAL" 'BEGIN{ c=c+0; if(c<=0) c=1; printf "%.6f", s*c }')
+        MARK="~"
+    fi
 
     # left = the balance you entered, minus everything spent since you entered it.
     LEFT=$(awk -v b="$BALANCE" -v s="$SPEND" 'BEGIN{ v=b-s; if(v<0) v=0; printf "%.2f", v }')
