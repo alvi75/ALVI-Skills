@@ -16,7 +16,8 @@ layout, a Windows machine, or a bar that is misbehaving.
 
 ## What ships here
 
-Two renderers (same output, same layouts), plus two helpers for the credit meter.
+Two renderers plus two helpers for the credit meter. The Bash renderer is ahead: the credit
+and spend-limit rows are Bash-only (see Known limits).
 
 | File | Platform | Needs |
 | --- | --- | --- |
@@ -126,7 +127,8 @@ stale number with the authority of a fresh one.
 
 ### The ledger is a directory, one file per session
 
-`~/.claude/credit-ledger.d/<session_id>`, each holding `accumulated baseline latest`.
+`~/.claude/credit-ledger.d/s-<session_id>`, each holding `accumulated baseline latest`. The
+`s-` prefix and the dot-leading temp name are both load-bearing - see the bullets below.
 
 - **One file per session, not one shared file.** Every open session re-renders on its own
   interval, so a shared read-modify-write loses updates — measured **9 of 60** rows surviving 60
