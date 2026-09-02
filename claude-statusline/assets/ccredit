@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Credit balance anchor. No API returns a credit balance, so you set it once and
+# the meter subtracts spend from there:
+#   ccredit set 35.06     re-anchor to whatever Console shows now
+#   ccredit topup 20      add a top-up to the current balance
+#   ccredit show          print the anchor
+set -euo pipefail
+CFG="$HOME/.claude/credit-config"
+LDIR="$HOME/.claude/credit-ledger.d"
+
+write() {
+    cat > "$CFG" <<EOF
+# Claude Code credit meter.
+# No API returns a credit balance, so BALANCE is entered by hand - the one
+# number you type. Everything after it is measured automatically:
+#     left now  =  BALANCE  -  spend since BALANCE_AT
+# Update it with:  ccredit set <what Console shows>   |   ccredit topup <amount>
+BALANCE=$1
+BALANCE_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+    chmod 600 "$CFG"
+    # Both derived stores measure spend SINCE the anchor, so both reset with it.
+    # Keeping them would re-subtract spend the new balance already accounts for.
+    rm -rf "$LDIR" 2>/dev/null || true
+    rm -f "${TMPDIR:-/tmp}"/cc-credit-spend-* 2>/dev/null || true
+}
+
+[ -f "$CFG" ] && . "$CFG"
+: "${BALANCE:=0}" "${BALANCE_AT:=never}"
+
+case "${1:-show}" in
+    set)
+        [ $# -ge 2 ] || { echo "usage: ccredit set <balance>" >&2; exit 1; }
+        write "$(awk -v n="$2" 'BEGIN{printf "%.2f", n}')"; . "$CFG"
+        echo "balance set to \$$BALANCE" ;;
+    topup)
+        [ $# -ge 2 ] || { echo "usage: ccredit topup <amount>" >&2; exit 1; }
+        write "$(awk -v a="$BALANCE" -v b="$2" 'BEGIN{printf "%.2f", a+b}')"; . "$CFG"
+        echo "topped up \$$2" ;;
+    show) ;;
+    *) echo "usage: ccredit {set <balance>|topup <amount>|show}" >&2; exit 1 ;;
+esac
+
+printf 'balance $%s as of %s\n' "$BALANCE" "$BALANCE_AT"

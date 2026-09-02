@@ -36,13 +36,13 @@ command -v jq >/dev/null 2>&1 || { printf '%s\n' "status line needs jq - see ~/.
 #
 # Delimiter is U+001F (unit separator), NOT a tab, and NOT U+0001: bash 3.2
 # (macOS /bin/bash) reserves 0x01 as CTLESC internally and silently eats it,
-# so a 0x01-delimited line comes back as one field. Emitted as a jq \u001f
+# so a 0x01-delimited line comes back as one field. Emitted as a jq 
 # escape rather than a literal byte so it survives copying/zipping. Tab is an IFS *whitespace* character, so with
 # IFS=$'\t' bash collapses runs of tabs into one separator and every empty field
 # shifts all later fields left - an absent .effort.level would land the session
 # id in the effort slot. A non-whitespace IFS preserves empty fields exactly.
 SEP=$'\037'
-IFS="$SEP" read -r MODEL DIR CTXPCT USED SIZE MS EFFORT FAST P5 R5 P7 R7 SID <<EOF
+IFS="$SEP" read -r MODEL DIR CTXPCT USED SIZE MS COST EFFORT FAST P5 R5 P7 R7 PS RS SID <<EOF
 $(printf '%s' "$input" | jq -j '[
   (.model.display_name // "claude"),
   (.workspace.current_dir // .cwd // ""),
@@ -50,12 +50,15 @@ $(printf '%s' "$input" | jq -j '[
   (.context_window.total_input_tokens // 0),
   (.context_window.context_window_size // 0),
   (.cost.total_duration_ms // 0),
+  (.cost.total_cost_usd // 0),
   (.effort.level // ""),
   (if .fast_mode then "fast" else "" end),
   (.rate_limits.five_hour.used_percentage // ""),
   (.rate_limits.five_hour.resets_at // ""),
   (.rate_limits.seven_day.used_percentage // ""),
   (.rate_limits.seven_day.resets_at // ""),
+  (.rate_limits.spend_limit.used_percentage // ""),
+  (.rate_limits.spend_limit.resets_at // ""),
   (.session_id // "nosession")
 ] | map(tostring) | join("\u001f")' 2>/dev/null)
 EOF
@@ -182,9 +185,10 @@ fi
 printf '%s\n' "${CYAN}"$'\342\227\206'" ${WHITE}${MODEL_SHORT}${R}${EFF}${FLAG}  ${LBL}${BASE}${R}${GIT}${TAIL}"
 
 # ---- line 2 ----
-has5=0; has7=0
+has5=0; has7=0; hasS=0
 case "$P5" in ''|*[!0-9.]*) ;; *) has5=1 ;; esac
 case "$P7" in ''|*[!0-9.]*) ;; *) has7=1 ;; esac
+case "$PS" in ''|*[!0-9.]*) ;; *) hasS=1 ;; esac
 
 if [ "$LAYOUT" = meters ] && { [ "$has5" = 1 ] || [ "$has7" = 1 ]; }; then
     p5=$(clamp "$P5"); p7=$(clamp "$P7")
@@ -223,6 +227,133 @@ if [ "$LAYOUT" = meters ] && { [ "$has5" = 1 ] || [ "$has7" = 1 ]; }; then
     [ "$has5" = 1 ] && OUT="${LBL}${A}${R}  $(meter "$p5f" "$W")"
     [ "$has7" = 1 ] && { [ -n "$OUT" ] && OUT="$OUT  "; OUT="${OUT}$(meter "$p7f" "$W")  ${LBL}${B}${R}"; }
     printf '%s\n' "$OUT"
+elif [ "$LAYOUT" = meters ] && [ "$hasS" = 1 ]; then
+    # Behind a Claude apps gateway, rate_limits can carry ONLY spend_limit. Before
+    # this branch existed such a payload fell through to the credit row, which
+    # showed hand-anchored dollars while ignoring the real first-party spend
+    # figure sitting in the payload. used_percentage may exceed 100 once the limit
+    # is passed, so the label reports the true value while the bar clamps at full.
+    psf=$(clampf "$PS")
+    psi=$(int "$PS"); [ "$psi" -lt 0 ] && psi=0
+    rs=$(fmt_reset "$(int "$RS")")
+    sl=""; ss=""
+    if [ "$rs" = resetting ]; then sl=" ${DOT} resetting"; ss="$sl"
+    elif [ -n "$rs" ]; then sl=" ${DOT} resets in $rs"; ss=" ${DOT} $rs"; fi
+    if [ "$psi" -ge 90 ]; then scol="$RED"; elif [ "$psi" -ge 75 ]; then scol="$AMBER"; else scol="$LBL"; fi
+    chrome=$(( 2 + RIGHT_PAD ))
+    SEL="S ${psi}%"; W=$METER_W
+    for f in "Spend limit: ${psi}%${sl}" "Spend ${psi}%${ss}" "S ${psi}%"; do
+        t=$(printf '%s' "$f" | awk '{print length($0)}')
+        if [ $(( t + METER_W + chrome )) -le "$COLS" ]; then SEL="$f"; W=$METER_W; break; fi
+        SEL="S ${psi}%"; t=$(printf '%s' "$SEL" | awk '{print length($0)}')
+        W=$(( COLS - t - chrome )); [ "$W" -lt 1 ] && W=1
+        [ "$W" -gt "$METER_W" ] && W=$METER_W
+    done
+    printf '%s\n' "${scol}${SEL}${R}  $(meter "$psf" "$W")"
+elif [ "$LAYOUT" = meters ] && [ -f "$HOME/.claude/credit-config" ]; then
+    # Credit (API-billing) auth: rate_limits is absent, so meter dollars instead.
+    # No API returns a credit balance, so BALANCE is hand-entered and we subtract
+    # spend measured since it was set.
+    BALANCE=0; BALANCE_AT=""
+    . "$HOME/.claude/credit-config" 2>/dev/null
+
+    # Ledger of session_id -> that session's latest cost estimate. Summing the
+    # latest value per session gives spend cumulative across sessions, which
+    # cost.total_cost_usd cannot on its own - it is per-session and resets on
+    # /clear. Keyed by session_id for exactly that reason.
+    # ONE FILE PER SESSION, not one shared file. Every open Claude Code session
+    # re-renders its own status line each refreshInterval, so a shared
+    # read-modify-write loses updates: measured 9 of 60 rows surviving 60
+    # concurrent writers, which understates spend and overstates money left.
+    # Per-session files mean writers never touch the same path; only the summing
+    # read walks the directory. macOS has no flock(1), so avoiding the shared
+    # write is the portable fix rather than locking it.
+    LDIR="$HOME/.claude/credit-ledger.d"
+    # session_id goes into a filename - keep it to a safe charset.
+    SIDK=$(printf '%s' "${SID:-nosession}" | tr -c 'A-Za-z0-9._-' '_')
+    COSTN=$(awk -v c="$COST" 'BEGIN{ c=c+0; if(c<0) c=0; printf "%.6f", c }')
+    mkdir -p "$LDIR" 2>/dev/null
+    LF="$LDIR/$SIDK"
+
+    # Fields: accumulated baseline latest.
+    #  baseline - cost this session had already reached when the balance was
+    #             anchored; spend before the anchor is already priced into it.
+    #  accumulated - spend banked from earlier segments of this same session.
+    # /clear zeroes cost.total_cost_usd, so the curve restarts from a new origin.
+    # Taking max() would silently discard every post-clear dollar below the old
+    # peak, so instead a drop is treated as a segment boundary: bank the finished
+    # segment and re-baseline at 0.
+    ACC=0; BASE="$COSTN"; LAST="$COSTN"
+    if [ -f "$LF" ]; then
+        norm=$(awk 'NR==1{printf "%.6f %.6f %.6f", $1+0, $2+0, $3+0}' "$LF" 2>/dev/null)
+        if [ -n "$norm" ]; then
+            pacc=${norm%% *}; prest=${norm#* }; pbase=${prest%% *}; plast=${prest##* }
+            if [ "$(awk -v c="$COSTN" -v l="$plast" 'BEGIN{print (c+0 < l+0)?1:0}')" = 1 ]; then
+                ACC=$(awk -v a="$pacc" -v b="$pbase" -v l="$plast" 'BEGIN{ d=l-b; if(d<0) d=0; printf "%.6f", a+d }')
+                BASE=0; LAST="$COSTN"
+            else
+                ACC="$pacc"; BASE="$pbase"; LAST="$COSTN"
+            fi
+        fi
+    fi
+    LTMP="$LF.$$"
+    printf '%s %s %s\n' "$ACC" "$BASE" "$LAST" > "$LTMP" 2>/dev/null && \
+        mv -f "$LTMP" "$LF" 2>/dev/null
+    rm -f "$LTMP" 2>/dev/null
+
+    LSUM=$(awk 'FNR==1 { d=$3-$2; if(d<0) d=0; s+=$1+d } END{printf "%.6f", s+0}' \
+             "$LDIR"/* 2>/dev/null)
+    case "$LSUM" in ''|*[!0-9.]*) LSUM=0 ;; esac
+
+    # Real billed spend wins when an admin credential is configured. The fetcher
+    # is spawned detached and we read only what it already cached - the render
+    # path must never wait on the network.
+    SPCACHE="${TMPDIR:-/tmp}/cc-credit-spend-$(id -u)"
+    BILLED=""
+    if [ -f "$SPCACHE" ]; then
+        IFS='|' read -r bamt bts bstat < "$SPCACHE" 2>/dev/null
+        BAGE=$(( $(date +%s) - $(int "${bts:-0}") ))
+        # Only a FRESH billed figure may print bare. Billing data itself lags ~5
+        # min, and a cached one can be arbitrarily old if refreshes keep failing
+        # - printing that with no marker presents a stale number as authoritative.
+        [ "${bstat:-}" = ok ] && [ "$BAGE" -lt 900 ] && BILLED="$bamt"
+        [ "$BAGE" -ge 300 ] && \
+            ( "$HOME/.claude/credit-spend.sh" >/dev/null 2>&1 & ) 2>/dev/null
+    elif [ -f "$HOME/.claude/.cost-api-key" ] || [ -n "${ANTHROPIC_ADMIN_KEY:-}" ]; then
+        ( "$HOME/.claude/credit-spend.sh" >/dev/null 2>&1 & ) 2>/dev/null
+    fi
+    # '~' marks any figure that is not a fresh billed number.
+    if [ -n "$BILLED" ]; then SPEND="$BILLED"; MARK=""; else SPEND="$LSUM"; MARK="~"; fi
+
+    # left = the balance you entered, minus everything spent since you entered it.
+    LEFT=$(awk -v b="$BALANCE" -v s="$SPEND" 'BEGIN{ v=b-s; if(v<0) v=0; printf "%.2f", v }')
+    SESS=$(awk -v c="$COSTN" 'BEGIN{ printf "%.2f", c }')
+    # Meter fills with the share of that balance already burned. A balance of 0 or
+    # less (or an unparseable one, which awk coerces to 0) means nothing is left,
+    # so the bar reads full - drawing it empty would say "nothing spent" in
+    # exactly the case where the label says $0.00 left, and the two must agree.
+    if [ "$(awk -v b="$BALANCE" 'BEGIN{print (b+0>0)?1:0}')" = 1 ]; then
+        UPCT=$(awk -v s="$SPEND" -v b="$BALANCE" 'BEGIN{ v=s*100/b; if(v<0)v=0; if(v>100)v=100; printf "%.4f", v }')
+    else UPCT=100; fi
+    UPI=$(clamp "$UPCT")
+    if [ "$UPI" -ge 90 ]; then ACOL="$RED"; elif [ "$UPI" -ge 75 ]; then ACOL="$AMBER"; else ACOL="$LBL"; fi
+
+    # Same three-tier label step-down as the subscription row.
+    c0l="Credits: ${MARK}\$${LEFT} left"; c0r="\$${SESS} this session"
+    c1l="Credits ${MARK}\$${LEFT}";       c1r="\$${SESS} sess"
+    c2l="${MARK}\$${LEFT}";               c2r="${UPI}%"
+    chrome=$(( 2 + 2 + RIGHT_PAD ))
+    CL="$c2l"; CR="$c2r"; W=$METER_W
+    for i in 0 1 2; do
+        case $i in 0) a="$c0l"; b="$c0r" ;; 1) a="$c1l"; b="$c1r" ;; 2) a="$c2l"; b="$c2r" ;; esac
+        t=$(printf '%s%s' "$a" "$b" | awk '{print length($0)}')
+        if [ $(( t + METER_W + chrome )) -le "$COLS" ]; then CL="$a"; CR="$b"; W=$METER_W; break; fi
+        if [ $i = 2 ]; then
+            W=$(( COLS - t - chrome )); [ "$W" -lt 1 ] && W=1
+            [ "$W" -gt "$METER_W" ] && W=$METER_W
+        fi
+    done
+    printf '%s\n' "${ACOL}${CL}${R}  $(meter "$UPCT" "$W")  ${LBL}${CR}${R}"
 else
     MSI=$(int "$MS"); MINS=$(( MSI / 60000 )); SECS=$(( (MSI % 60000) / 1000 ))
     rl=""
