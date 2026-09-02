@@ -91,6 +91,22 @@ that both derived stores (`credit-ledger.d/` and the cached billed total) measur
 anchor, so `ccredit` deletes both on every write. Leaving them would re-subtract spend the new
 balance already accounts for.
 
+To be exact: no *API* endpoint returns a balance. Claude Code itself has a local path - `/usage`
+(alias `/cost`) shows a usage-credits row, and `/usage-credits` opens claude.ai Settings > Usage
+where the balance, month-to-date spend and monthly spend limit live. Neither is machine-readable
+from a status line script, which is why the balance is still anchored by hand.
+
+### Known limits
+
+- Two renders of the **same** session that interleave can lose the higher `latest` (measured about
+  1 in 2000). The next render corrects it, so it self-heals rather than drifting.
+- A session's **first observed** cost is treated as pre-anchor spend, since the two are
+  indistinguishable. Up to one refresh interval of spend at session start therefore goes uncounted.
+  Re-anchoring with `ccredit set` resets this cleanly.
+- `statusline.ps1` has **no credit or spend-limit row** - those are Bash-only. The PowerShell
+  renderer still covers the quota and context rows, and its suite asserts no dollar figure appears,
+  which remains correct for it.
+
 Two spend sources, in precedence order:
 
 | Source | Marker | Needs | Notes |
