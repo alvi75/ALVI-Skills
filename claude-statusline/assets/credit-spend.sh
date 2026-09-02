@@ -13,7 +13,30 @@ CFG="$HOME/.claude/credit-config"
 CACHE="${TMPDIR:-/tmp}/cc-credit-spend-$(id -u)"
 KEYFILE="$HOME/.claude/.cost-api-key"
 
-emit() { printf '%s|%s|%s\n' "$1" "$(date +%s)" "$2" > "$CACHE"; exit 0; }
+# Atomic write: the status line reads this file on every render, and '>' truncates
+# before it writes, so a reader can otherwise catch it empty or half-written.
+emit() {
+    _t="$CACHE.$$"
+    printf '%s|%s|%s\n' "$1" "$(date +%s)" "$2" > "$_t" 2>/dev/null &&
+        mv -f "$_t" "$CACHE" 2>/dev/null
+    rm -f "$_t" 2>/dev/null
+    exit 0
+}
+
+# One fetch at a time. Every open session spawns this when the cache goes stale,
+# so without a gate N sessions expiring together fire N full paginated sweeps at
+# the API. mkdir is the atomic test-and-set; a lock older than 120s is assumed
+# dead (the holder was killed) and reclaimed.
+LOCK="$CACHE.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+    _age=$(( $(date +%s) - $(
+        stat -c %Y "$LOCK" 2>/dev/null || stat -f %m "$LOCK" 2>/dev/null || echo 0
+    ) ))
+    [ "$_age" -lt 120 ] && exit 0
+    rmdir "$LOCK" 2>/dev/null
+    mkdir "$LOCK" 2>/dev/null || exit 0
+fi
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM HUP
 
 command -v curl >/dev/null 2>&1 || emit 0 nocurl
 [ -f "$CFG" ] || emit 0 nokey

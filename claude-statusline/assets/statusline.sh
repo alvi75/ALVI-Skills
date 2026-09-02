@@ -28,8 +28,11 @@ while [ $# -gt 0 ]; do
 done
 case "$LAYOUT" in meters|context) ;; *) LAYOUT=meters ;; esac
 
+# Rule 1: empty stdout blanks the bar just as silently as a non-zero exit, so
+# every unparseable-input path prints this instead of nothing.
+FALLBACK=$'\342\227\206'" claude"
 input=$(cat)
-[ -z "$input" ] && exit 0
+[ -z "$input" ] && { printf '%s\n' "$FALLBACK"; exit 0; }
 command -v jq >/dev/null 2>&1 || { printf '%s\n' "status line needs jq - see ~/.claude/statusline.sh"; exit 0; }
 
 # One jq call - each extra process spawn costs ~85ms on Windows, ~5ms elsewhere.
@@ -62,7 +65,7 @@ $(printf '%s' "$input" | jq -j '[
   (.session_id // "nosession")
 ] | map(tostring) | join("\u001f")' 2>/dev/null)
 EOF
-[ -z "$MODEL" ] && exit 0
+[ -z "$MODEL" ] && { printf '%s\n' "$FALLBACK"; exit 0; }
 
 E=$'\033'
 R="$E[0m"; DIM="$E[2m"; CYAN="$E[36m"; GREEN="$E[32m"; YEL="$E[33m"; MAG="$E[35m"
@@ -269,11 +272,15 @@ elif [ "$LAYOUT" = meters ] && [ -f "$HOME/.claude/credit-config" ]; then
     # read walks the directory. macOS has no flock(1), so avoiding the shared
     # write is the portable fix rather than locking it.
     LDIR="$HOME/.claude/credit-ledger.d"
-    # session_id goes into a filename - keep it to a safe charset.
+    # session_id goes into a filename - keep it to a safe charset, then prefix it.
+    # The 's-' prefix is load-bearing: without it a session_id of ".." resolves
+    # LF to the parent directory (mv -f then drops the temp into ~/.claude and
+    # loses the update), and any dot-leading id creates a file the sum below
+    # cannot see, so that session's spend would never be counted.
     SIDK=$(printf '%s' "${SID:-nosession}" | tr -c 'A-Za-z0-9._-' '_')
     COSTN=$(awk -v c="$COST" 'BEGIN{ c=c+0; if(c<0) c=0; printf "%.6f", c }')
     mkdir -p "$LDIR" 2>/dev/null
-    LF="$LDIR/$SIDK"
+    LF="$LDIR/s-$SIDK"
 
     # Fields: accumulated baseline latest.
     #  baseline - cost this session had already reached when the balance was
@@ -283,26 +290,36 @@ elif [ "$LAYOUT" = meters ] && [ -f "$HOME/.claude/credit-config" ]; then
     # Taking max() would silently discard every post-clear dollar below the old
     # peak, so instead a drop is treated as a segment boundary: bank the finished
     # segment and re-baseline at 0.
-    ACC=0; BASE="$COSTN"; LAST="$COSTN"
+    # CBASE, not BASE - BASE already holds the line-1 project basename.
+    ACC=0; CBASE="$COSTN"; LAST="$COSTN"
     if [ -f "$LF" ]; then
         norm=$(awk 'NR==1{printf "%.6f %.6f %.6f", $1+0, $2+0, $3+0}' "$LF" 2>/dev/null)
         if [ -n "$norm" ]; then
             pacc=${norm%% *}; prest=${norm#* }; pbase=${prest%% *}; plast=${prest##* }
             if [ "$(awk -v c="$COSTN" -v l="$plast" 'BEGIN{print (c+0 < l+0)?1:0}')" = 1 ]; then
                 ACC=$(awk -v a="$pacc" -v b="$pbase" -v l="$plast" 'BEGIN{ d=l-b; if(d<0) d=0; printf "%.6f", a+d }')
-                BASE=0; LAST="$COSTN"
+                CBASE=0; LAST="$COSTN"
             else
-                ACC="$pacc"; BASE="$pbase"; LAST="$COSTN"
+                ACC="$pacc"; CBASE="$pbase"; LAST="$COSTN"
             fi
         fi
     fi
-    LTMP="$LF.$$"
-    printf '%s %s %s\n' "$ACC" "$BASE" "$LAST" > "$LTMP" 2>/dev/null && \
+    # Temp is dot-leading so the 's-*' sum below cannot see it. A render killed
+    # between the write and the rename leaves an orphan, and an orphan matched by
+    # the sum would double-count that session's spend permanently.
+    LTMP="$LDIR/.tmp.$$"
+    printf '%s %s %s\n' "$ACC" "$CBASE" "$LAST" > "$LTMP" 2>/dev/null && \
         mv -f "$LTMP" "$LF" 2>/dev/null
     rm -f "$LTMP" 2>/dev/null
 
-    LSUM=$(awk 'FNR==1 { d=$3-$2; if(d<0) d=0; s+=$1+d } END{printf "%.6f", s+0}' \
-             "$LDIR"/* 2>/dev/null)
+    # find|xargs, not "$LDIR"/* - the glob execs one argument per session and
+    # blows ARG_MAX past ~12k sessions. That failure is silent (stderr is
+    # discarded), LSUM comes back empty, and an empty sum reads as "nothing
+    # spent", i.e. it overstates money left. xargs batches instead, and cat
+    # rather than awk-per-file keeps the total in one awk process.
+    LSUM=$(find "$LDIR" -type f -name 's-*' -print0 2>/dev/null \
+             | xargs -0 cat 2>/dev/null \
+             | awk 'NF==3 { d=$3-$2; if(d<0) d=0; s+=$1+d } END{printf "%.6f", s+0}')
     case "$LSUM" in ''|*[!0-9.]*) LSUM=0 ;; esac
 
     # Real billed spend wins when an admin credential is configured. The fetcher
@@ -313,10 +330,16 @@ elif [ "$LAYOUT" = meters ] && [ -f "$HOME/.claude/credit-config" ]; then
     if [ -f "$SPCACHE" ]; then
         IFS='|' read -r bamt bts bstat < "$SPCACHE" 2>/dev/null
         BAGE=$(( $(date +%s) - $(int "${bts:-0}") ))
+        # Validate before trusting. An unvalidated amount is the worst failure in
+        # here: a negative one (cost_report can carry refunds, and credit-spend.sh
+        # admits '-' into the sum) prints MORE money than the anchor, and a
+        # non-numeric one is promoted to an authoritative "$0 spent" with the '~'
+        # estimate marker dropped. Both overstate money left.
+        case "$bamt" in ''|*[!0-9.]*) bamt="" ;; esac
         # Only a FRESH billed figure may print bare. Billing data itself lags ~5
         # min, and a cached one can be arbitrarily old if refreshes keep failing
         # - printing that with no marker presents a stale number as authoritative.
-        [ "${bstat:-}" = ok ] && [ "$BAGE" -lt 900 ] && BILLED="$bamt"
+        [ -n "$bamt" ] && [ "${bstat:-}" = ok ] && [ "$BAGE" -lt 900 ] && BILLED="$bamt"
         [ "$BAGE" -ge 300 ] && \
             ( "$HOME/.claude/credit-spend.sh" >/dev/null 2>&1 & ) 2>/dev/null
     elif [ -f "$HOME/.claude/.cost-api-key" ] || [ -n "${ANTHROPIC_ADMIN_KEY:-}" ]; then
