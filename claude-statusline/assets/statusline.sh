@@ -188,8 +188,13 @@ fi
 [ -z "$LLIM" ]  && case "$XUL" in ''|*[!0-9.]*) ;; *) LLIM=$(int "$XUL") ;; esac
 # Refresh cadence: 60 s normally, 10 min after an auth-shaped failure so a
 # logged-out machine is not polled every render.
-_need=60; case "$LST" in noauth|expired|nocurl|nojq) _need=600 ;; esac
-if [ "$LAYOUT" = meters ] && [ "$CRMODE" != quota ] && [ "$CRSRC" != manual ] && [ "$LIVE_AGE" -ge "$_need" ] && [ -x "$HOME/.claude/credit-balance.sh" ]; then
+_need=60; case "$LST" in noauth|nocreds|notoken|expired|nocurl|nojq) _need=600 ;; esac
+# SOURCE=manual fetches too. It used to be excluded as a pointless network call
+# - the hand anchor did not need one - but that also meant nothing ever went
+# looking for which organization holds the Console pool, so the anchor could
+# only ever drift. The fetcher discovers that org and a real balance replaces
+# the estimate below; when it finds nothing the anchor is still there.
+if [ "$LAYOUT" = meters ] && [ "$CRMODE" != quota ] && [ "$LIVE_AGE" -ge "$_need" ] && [ -x "$HOME/.claude/credit-balance.sh" ]; then
     ( "$HOME/.claude/credit-balance.sh" >/dev/null 2>&1 & ) 2>/dev/null
 fi
 # "Credits in use" = the balance was seen falling within ACTIVE_WINDOW, or a
@@ -210,6 +215,13 @@ if [ "$CRSRC" = manual ] && [ "$LEGACY" = 1 ] && [ "$CRMODE" != quota ]; then
     if [ "$CRMODE" = credits ]; then MANUAL=1
     elif [ "$has5" = 0 ] && [ "$has7" = 0 ] && [ "$hasS" = 0 ]; then MANUAL=1; fi
 fi
+# A fresh, non-zero live balance beats the hand anchor even on SOURCE=manual:
+# it is the server's own number instead of anchor-minus-estimate, it falls as
+# you spend, and it jumps the moment you top up - no re-anchoring. Zero is NOT
+# a takeover: an empty claude.ai pool says nothing about the Console pool, and
+# reading it as "$0.00 left" would replace a real reserve with a wrong figure.
+MLIVE=0
+if [ "$CRSRC" = manual ] && [ "$LIVE_OK" = 1 ] && [ "$LIVE_STALE" = 0 ] && [ "$LBAL" != 0 ]; then MLIVE=1; fi
 CR_ACTIVE=0
 if [ "$CRSRC" = manual ]; then CR_ACTIVE=0
 elif [ "$CRMODE" = credits ]; then CR_ACTIVE=1
@@ -229,82 +241,12 @@ cents() { awk -v c="$1" -v d="${LDP:-2}" 'BEGIN{ p=1; for(i=0;i<d;i++) p*=10; pr
 # Out of credits is a state worth naming: "$0.00" alone reads like a failed fetch.
 OUT=0; [ "$LWHY" = out_of_credits ] && OUT=1
 
-# ---- line 1 ----
-MODEL_SHORT=$(printf '%s' "$MODEL" | sed 's/[[:space:]]*(.*)[[:space:]]*$//')
-EFF=""; EFF_P=""
-if [ -n "$EFFORT" ]; then
-    EFF_P=$(printf '%s' "$EFFORT" | awk '{ print toupper(substr($0,1,1)) substr($0,2) }')
-    EFF="  ${LBL}${EFF_P}${R}"; EFF_P="  $EFF_P"
-fi
-FLAG=""; FLAG_P=""
-[ -n "$FAST" ] && { FLAG=" ${DIM}${DOT} fast${R}"; FLAG_P=" ${DOT} fast"; }
-BASE="${DIR##*[/\\]}"; [ -z "$BASE" ] && BASE="?"
-
-CACHE="${TMPDIR:-/tmp}/cc-statusline-git-$(printf '%s' "${SID:-nosession}" | tr -c 'A-Za-z0-9-' '_')"
-stale=1
-if [ -f "$CACHE" ]; then
-    # GNU stat -c first: on Linux the BSD form prints a usage report to stdout
-    # before failing, and that output would break the arithmetic.
-    mtime=$(stat -c %Y "$CACHE" 2>/dev/null || stat -f %m "$CACHE" 2>/dev/null || echo 0)
-    [ $(( $(date +%s) - $(int "$mtime") )) -le 5 ] && stale=0
-fi
-if [ "$stale" = 1 ]; then
-    rec=""
-    if [ -d "$DIR" ] && ( cd "$DIR" && git rev-parse --git-dir >/dev/null 2>&1 ); then
-        br=$(cd "$DIR" && git branch --show-current 2>/dev/null)
-        [ -z "$br" ] && br="detached@$(cd "$DIR" && git rev-parse --short HEAD 2>/dev/null)"
-        st=$(cd "$DIR" && git diff --cached --name-only 2>/dev/null | grep -c .)
-        md=$(cd "$DIR" && git diff --name-only 2>/dev/null | grep -c .)
-        rec="$br|$st|$md"
-    fi
-    printf '%s' "$rec" > "$CACHE"
-fi
-IFS='|' read -r BR ST MD < "$CACHE"
-GIT=""; GIT_P=""
-if [ -n "$BR" ]; then
-    marks=""; marks_p=""
-    [ "$(int "$ST")" -gt 0 ] && { marks="$marks ${GREEN}+${ST}${R}"; marks_p="$marks_p +${ST}"; }
-    [ "$(int "$MD")" -gt 0 ] && { marks="$marks ${YEL}~${MD}${R}"; marks_p="$marks_p ~${MD}"; }
-    GIT="  ${MAG}"$'\342\216\207'" ${BR}${R}${marks}"
-    GIT_P="  "$'\342\216\207'" ${BR}${marks_p}"
-fi
-
-CTXI=$(clamp "$CTXPCT"); CTXF=$(clampf "$CTXPCT")
-if [ "$(int "$SIZE")" -gt 0 ]; then CTXTOK="$(fmt_tok "$(int "$USED")")/$(fmt_tok "$(int "$SIZE")")"
-else CTXTOK="$(fmt_tok "$(int "$USED")") tok"; fi
-
-TAIL=""
-if [ "$LAYOUT" = meters ]; then
-    tail_txt="ctx ${CTXI}% ${DOT} ${CTXTOK}"
-    # A known balance that is NOT being drawn on right now still gets a glance
-    # on line 1, so a top-up landing (or running dry) is visible without the
-    # meter taking over line 2. Dropped first when the width runs out.
-    hint=""
-    # Off by default. On a subscription the bar must look exactly as it did
-    # before any of this existed, and a balance appended to line 1 is still a
-    # credit thing on a screen that should have none. HINT=on in credit-config
-    # brings it back for anyone who wants the reserve in view.
-    if [ "$CRHINT" = 1 ] && [ "$LIVE_OK" = 1 ] && [ "$CR_ACTIVE" = 0 ] && [ "$CRSRC" != manual ]; then
-        _m=""; [ "$LIVE_STALE" = 1 ] && _m="~"
-        if [ "$OUT" = 1 ]; then hint=" ${DOT} no credits"
-        else hint=" ${DOT} credits ${_m}\$$(cents "$LBAL")"; fi
-    fi
-    plain1=$'\342\227\206'" ${MODEL_SHORT}${EFF_P}${FLAG_P}  ${BASE}${GIT_P}"
-    # printable length in characters, not bytes
-    plen=$(printf '%s' "$plain1$tail_txt$hint" | awk '{ print length($0) }')
-    if [ -n "$hint" ] && [ $(( plen + 2 + RIGHT_PAD )) -gt "$COLS" ]; then
-        hint=""; plen=$(printf '%s' "$plain1$tail_txt" | awk '{ print length($0) }')
-    fi
-    if [ $(( plen + 2 + RIGHT_PAD )) -le "$COLS" ]; then
-        if [ "$CTXI" -ge 90 ]; then tcol="$RED"; elif [ "$CTXI" -ge 70 ]; then tcol="$AMBER"; else tcol="$LBL"; fi
-        TAIL="  ${tcol}${tail_txt}${hint}${R}"
-    fi
-fi
-# %s not %b: the colour constants already hold literal ESC bytes, and %b would
-# escape-process any branch name or model string containing a backslash.
-printf '%s\n' "${CYAN}"$'\342\227\206'" ${WHITE}${MODEL_SHORT}${R}${EFF}${FLAG}  ${LBL}${BASE}${R}${GIT}${TAIL}"
-
-manual_row() {
+manual_calc() {
+# Split out of manual_row so line 1 can show the same figure as a tail
+# (HINT=on) without the row taking over line 2. Runs at most once per
+# render: the ledger write inside is a read-modify-write, and a second
+# pass would bank the current segment twice.
+[ "${MCALC:-0}" = 1 ] && return 0
     # Console (API-key) billing: rate_limits is absent and there is no claude.ai
 # login to ask for a balance, so BALANCE is hand-entered (ccredit set) and
 # spend measured since then is subtracted. Kept for that auth mode only; a
@@ -423,8 +365,106 @@ SESS=$(awk -v c="$COSTN" 'BEGIN{ printf "%.2f", c }')
 if [ "$(awk -v b="$BALANCE" 'BEGIN{print (b+0>0)?1:0}')" = 1 ]; then
     UPCT=$(awk -v s="$SPEND" -v b="$BALANCE" 'BEGIN{ v=s*100/b; if(v<0)v=0; if(v>100)v=100; printf "%.4f", v }')
 else UPCT=100; fi
+# Server number wins. Bar fills against the balance seen after the last top-up
+# (LTOT), so a recharge visibly empties it, and MARK clears because nothing here
+# is estimated any more.
+if [ "$MLIVE" = 1 ]; then
+    LEFT=$(cents "$LBAL"); MARK=""
+    _tot="$LTOT"; { [ -z "$_tot" ] || [ "$_tot" -lt "$LBAL" ]; } && _tot="$LBAL"
+    if [ "$_tot" -gt 0 ]; then
+        UPCT=$(awk -v b="$LBAL" -v t="$_tot" 'BEGIN{ v=(t-b)*100/t; if(v<0)v=0; if(v>100)v=100; printf "%.4f", v }')
+    else UPCT=100; fi
+fi
 UPI=$(clamp "$UPCT")
 if [ "$UPI" -ge 90 ]; then ACOL="$RED"; elif [ "$UPI" -ge 75 ]; then ACOL="$AMBER"; else ACOL="$LBL"; fi
+MCALC=1
+}
+
+# ---- line 1 ----
+MODEL_SHORT=$(printf '%s' "$MODEL" | sed 's/[[:space:]]*(.*)[[:space:]]*$//')
+EFF=""; EFF_P=""
+if [ -n "$EFFORT" ]; then
+    EFF_P=$(printf '%s' "$EFFORT" | awk '{ print toupper(substr($0,1,1)) substr($0,2) }')
+    EFF="  ${LBL}${EFF_P}${R}"; EFF_P="  $EFF_P"
+fi
+FLAG=""; FLAG_P=""
+[ -n "$FAST" ] && { FLAG=" ${DIM}${DOT} fast${R}"; FLAG_P=" ${DOT} fast"; }
+BASE="${DIR##*[/\\]}"; [ -z "$BASE" ] && BASE="?"
+
+CACHE="${TMPDIR:-/tmp}/cc-statusline-git-$(printf '%s' "${SID:-nosession}" | tr -c 'A-Za-z0-9-' '_')"
+stale=1
+if [ -f "$CACHE" ]; then
+    # GNU stat -c first: on Linux the BSD form prints a usage report to stdout
+    # before failing, and that output would break the arithmetic.
+    mtime=$(stat -c %Y "$CACHE" 2>/dev/null || stat -f %m "$CACHE" 2>/dev/null || echo 0)
+    [ $(( $(date +%s) - $(int "$mtime") )) -le 5 ] && stale=0
+fi
+if [ "$stale" = 1 ]; then
+    rec=""
+    if [ -d "$DIR" ] && ( cd "$DIR" && git rev-parse --git-dir >/dev/null 2>&1 ); then
+        br=$(cd "$DIR" && git branch --show-current 2>/dev/null)
+        [ -z "$br" ] && br="detached@$(cd "$DIR" && git rev-parse --short HEAD 2>/dev/null)"
+        st=$(cd "$DIR" && git diff --cached --name-only 2>/dev/null | grep -c .)
+        md=$(cd "$DIR" && git diff --name-only 2>/dev/null | grep -c .)
+        rec="$br|$st|$md"
+    fi
+    printf '%s' "$rec" > "$CACHE"
+fi
+IFS='|' read -r BR ST MD < "$CACHE"
+GIT=""; GIT_P=""
+if [ -n "$BR" ]; then
+    marks=""; marks_p=""
+    [ "$(int "$ST")" -gt 0 ] && { marks="$marks ${GREEN}+${ST}${R}"; marks_p="$marks_p +${ST}"; }
+    [ "$(int "$MD")" -gt 0 ] && { marks="$marks ${YEL}~${MD}${R}"; marks_p="$marks_p ~${MD}"; }
+    GIT="  ${MAG}"$'\342\216\207'" ${BR}${R}${marks}"
+    GIT_P="  "$'\342\216\207'" ${BR}${marks_p}"
+fi
+
+CTXI=$(clamp "$CTXPCT"); CTXF=$(clampf "$CTXPCT")
+if [ "$(int "$SIZE")" -gt 0 ]; then CTXTOK="$(fmt_tok "$(int "$USED")")/$(fmt_tok "$(int "$SIZE")")"
+else CTXTOK="$(fmt_tok "$(int "$USED")") tok"; fi
+
+TAIL=""
+if [ "$LAYOUT" = meters ]; then
+    tail_txt="ctx ${CTXI}% ${DOT} ${CTXTOK}"
+    # A known balance that is NOT being drawn on right now still gets a glance
+    # on line 1, so a top-up landing (or running dry) is visible without the
+    # meter taking over line 2. Dropped first when the width runs out.
+    hint=""
+    # Off by default. On a subscription the bar must look exactly as it did
+    # before any of this existed, and a balance appended to line 1 is still a
+    # credit thing on a screen that should have none. HINT=on in credit-config
+    # brings it back for anyone who wants the reserve in view.
+    if [ "$CRHINT" = 1 ] && [ "$CRSRC" = manual ] && [ "$LEGACY" = 1 ] && [ "$MANUAL" = 0 ] && [ "$CRMODE" != quota ]; then
+        # Hand-anchored Console pool. The row stays off line 2 while a plan
+        # window is present - that money is not moving - but the reserve is
+        # still worth a glance, so line 1 carries it. The figure comes from the
+        # same manual_calc the row would use, marker included, so a tail and a
+        # row can never disagree about how much is left.
+        manual_calc
+        hint=" ${DOT} credits ${MARK}\$${LEFT}"
+    elif [ "$CRHINT" = 1 ] && [ "$LIVE_OK" = 1 ] && [ "$CR_ACTIVE" = 0 ] && [ "$CRSRC" != manual ]; then
+        _m=""; [ "$LIVE_STALE" = 1 ] && _m="~"
+        if [ "$OUT" = 1 ]; then hint=" ${DOT} no credits"
+        else hint=" ${DOT} credits ${_m}\$$(cents "$LBAL")"; fi
+    fi
+    plain1=$'\342\227\206'" ${MODEL_SHORT}${EFF_P}${FLAG_P}  ${BASE}${GIT_P}"
+    # printable length in characters, not bytes
+    plen=$(printf '%s' "$plain1$tail_txt$hint" | awk '{ print length($0) }')
+    if [ -n "$hint" ] && [ $(( plen + 2 + RIGHT_PAD )) -gt "$COLS" ]; then
+        hint=""; plen=$(printf '%s' "$plain1$tail_txt" | awk '{ print length($0) }')
+    fi
+    if [ $(( plen + 2 + RIGHT_PAD )) -le "$COLS" ]; then
+        if [ "$CTXI" -ge 90 ]; then tcol="$RED"; elif [ "$CTXI" -ge 70 ]; then tcol="$AMBER"; else tcol="$LBL"; fi
+        TAIL="  ${tcol}${tail_txt}${hint}${R}"
+    fi
+fi
+# %s not %b: the colour constants already hold literal ESC bytes, and %b would
+# escape-process any branch name or model string containing a backslash.
+printf '%s\n' "${CYAN}"$'\342\227\206'" ${WHITE}${MODEL_SHORT}${R}${EFF}${FLAG}  ${LBL}${BASE}${R}${GIT}${TAIL}"
+
+manual_row() {
+manual_calc
 
 # Same three-tier label step-down as the subscription row.
 c0l="Credits: ${MARK}\$${LEFT} left"; c0r="\$${SESS} this session"

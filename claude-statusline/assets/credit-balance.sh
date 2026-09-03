@@ -163,11 +163,21 @@ if [ "$(uname -s)" = Darwin ] && command -v security >/dev/null 2>&1; then
     fi
 fi
 [ -z "$CREDS" ] && [ -f "$HOME/.claude/.credentials.json" ] && CREDS=$(cat "$HOME/.claude/.credentials.json" 2>/dev/null)
-[ -n "$CREDS" ] || fail noauth
+# One "noauth" for four different causes made this undebuggable: the Keychain
+# item read fine by hand while the fetcher still reported noauth, and nothing
+# said whether the item was missing, the wrong shape, or the token expired.
+# Each cause now has its own status. KSHAPE is top-level KEY NAMES only - never
+# a value - so a changed payload shape is diagnosable without printing a secret.
+[ -n "$CREDS" ] || fail nocreds
 TOKEN=$(printf '%s' "$CREDS" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
 EXP=$(printf '%s' "$CREDS" | jq -r '.claudeAiOauth.expiresAt // 0' 2>/dev/null)
+if [ -z "$TOKEN" ]; then
+    KSHAPE=$(printf '%s' "$CREDS" | jq -r 'if type=="object" then (keys|join("_")) else type end' 2>/dev/null | tr -cd 'a-zA-Z_' | head -c 24)
+    unset CREDS
+    p_reason="keys_${KSHAPE:-unparsed}"
+    fail notoken
+fi
 unset CREDS
-[ -n "$TOKEN" ] || fail noauth
 # expiresAt is epoch milliseconds. Claude Code refreshes the token itself while
 # it runs; this script only reports, it never refreshes.
 isint "$EXP" || EXP=0
@@ -209,6 +219,60 @@ if [ "${1:-}" = "--orgs" ]; then
             "$(printf '%s' "$BODY" | jq -c '{amount,currency,auto_reload_settings}' 2>/dev/null || printf '(non-JSON, %s bytes)' "${#BODY}")"
     done
     exit 0
+fi
+
+# ---- which organization actually holds the money
+# ~/.claude.json names only the LOGIN org, and an account can carry more than
+# one: the claude.ai usage-credit pool and a Console prepaid pool are different
+# orgs with different amounts. Polling the login org alone reported $0.00 while
+# console.anthropic.com showed real money, so the meter sat on a hand-typed
+# anchor that drifted. Ask every org the login can see, keep whichever holds a
+# balance, and re-check on a TTL so a top-up into a different org is still
+# found. Only a uuid is written; the token never touches disk.
+ORGF="$HOME/.claude/credit-org"
+ORG_TTL=3600
+# An explicit ORG= in credit-config pins it and skips discovery entirely.
+ORG_PIN=$(awk -F= '$1=="ORG"{ sub(/\r$/,""); v=$2; gsub(/^["[:space:]]+|["[:space:]]+$/,"",v); print v }' "$CFG" 2>/dev/null | tail -1)
+case "$ORG_PIN" in ''|*[!0-9a-fA-F-]*) ORG_PIN="" ;; esac
+
+org_discover() {
+    _all=$(curl -sS --max-time 8 "https://api.anthropic.com/api/oauth/organizations" \
+            -H "Authorization: Bearer $TOKEN" -H 'anthropic-beta: oauth-2025-04-20' \
+            -H 'Content-Type: application/json' -H 'User-Agent: cc-statusline-credit/2.0' 2>/dev/null)
+    _ids=$(printf '%s' "$_all" | jq -r '(if type=="array" then . else (.organizations // .data // []) end)
+                | .[] | (.uuid // .id // "") | select(length>0)' 2>/dev/null)
+    # The login org is always a candidate, even if the list call failed.
+    _ids=$(printf '%s\n%s\n' "$ORG" "$_ids" | awk 'NF && !seen[$0]++')
+    _best=""; _bestamt=-1; _table=""
+    for _id in $_ids; do
+        case "$_id" in ''|*[!0-9a-fA-F-]*) continue ;; esac
+        get "/api/oauth/organizations/$_id/prepaid/credits"
+        _amt=$(printf '%s' "$BODY" | jq -r 'if (.amount|type)=="number" then (.amount|floor|tostring) else "" end' 2>/dev/null)
+        isint "$_amt" || _amt=""
+        _table="${_table}${_id}|${CODE}|${_amt:--}
+"
+        [ -n "$_amt" ] && [ "$_amt" -gt "$_bestamt" ] && { _bestamt="$_amt"; _best="$_id"; }
+    done
+    # Diagnostic table: uuid|http|amount_minor. No token, no names - just enough
+    # to answer "is this pool readable at all, and by which org".
+    printf '%s' "$_table" > "$ORGF.all" 2>/dev/null; chmod 600 "$ORGF.all" 2>/dev/null
+    [ -n "$_best" ] && printf '%s|%s\n' "$_best" "$(date +%s)" > "$ORGF" 2>/dev/null && chmod 600 "$ORGF" 2>/dev/null
+    [ -n "$_best" ] && ORG="$_best"
+}
+
+if [ -n "$ORG_PIN" ]; then
+    ORG="$ORG_PIN"
+else
+    _co=""; _ct=0
+    [ -f "$ORGF" ] && IFS='|' read -r _co _ct < "$ORGF" 2>/dev/null
+    case "$_co" in ''|*[!0-9a-fA-F-]*) _co="" ;; esac
+    isint "$_ct" || _ct=0
+    _cage=$(( $(date +%s) - _ct )); [ "$_cage" -lt 0 ] && _cage=0
+    # Re-discover when the cached choice is stale, absent, or when the pool we
+    # settled on has since gone to zero - a zero balance is exactly the state
+    # where the money is probably sitting in a different org.
+    if [ -n "$_co" ] && [ "$_cage" -lt "$ORG_TTL" ] && [ "${p_bal:-0}" != 0 ]; then ORG="$_co"
+    else org_discover; fi
 fi
 
 get "/api/oauth/organizations/$ORG/prepaid/credits"; CODE1=$CODE; RAW_CREDITS=$BODY

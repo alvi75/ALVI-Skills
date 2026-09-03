@@ -92,11 +92,26 @@ an earlier version of this meter invisible for a whole session.
 | Pool | Where you see it | Readable? |
 | --- | --- | --- |
 | **claude.ai usage credits** — extra usage once a plan window is spent | `/usage-credits`, claude.ai Settings > Usage | Yes, live (below) |
-| **Console prepaid credits** — consumed by API keys, Claude Code and the playground | console.anthropic.com > Billing | **No endpoint exposes it.** Hand-anchored |
+| **Console prepaid credits** — consumed by API keys, Claude Code and the playground | console.anthropic.com > Billing | Only if a **different org** exposes it — the fetcher now goes looking (below) |
 
-An account can hold both, and one being empty says nothing about the other. Check which pool the
-number you care about lives in before wiring anything up: `ccredit orgs` asks every organization
-the login can see and prints what each one reports.
+An account can hold both, and one being empty says nothing about the other. `~/.claude.json` names
+only the **login** org, so polling that one alone can report `$0.00` while Console shows real money
+— which is exactly what stranded an earlier version on a hand anchor that could only drift.
+
+The fetcher therefore discovers the org rather than assuming it: it lists every organization the
+login can see, asks each one for `prepaid/credits`, and keeps whichever holds a balance. The choice
+is cached in `~/.claude/credit-org` for an hour and re-run when it expires **or** when the chosen
+pool reads zero — a zero balance is precisely when the money is likely to be sitting somewhere else.
+`ORG=<uuid>` in `credit-config` pins it and skips discovery. `~/.claude/credit-org.all` is the
+diagnostic table (`uuid|http|amount_minor`); `ccredit orgs` prints the same thing live. Neither
+writes a token.
+
+**A fresh, non-zero live balance beats the hand anchor**, even under `SOURCE=manual`: it is the
+server's own number rather than anchor-minus-estimate, so it falls as you spend, jumps the moment
+you top up, and drops the `~`. Zero deliberately does *not* take over — an empty claude.ai pool says
+nothing about the Console pool, and rendering it as `$0.00 left` would erase a reserve that is
+really there. A stale reading keeps the anchor too. This is why `SOURCE=manual` now runs the
+fetcher: excluding it looked like a saved network call, but it was what kept the anchor blind.
 
 ### claude.ai login with usage credits (the normal case)
 
@@ -153,8 +168,8 @@ failed fetch keeps the previous good balance and marks it, it does not print `$0
 
 ### Console prepaid credits (hand-anchored)
 
-No endpoint returns this balance — not the Admin API, not the Usage & Cost API (verified against
-both references), and not the OAuth endpoints above, which report the *other* pool. So it is
+This is the fallback for when discovery comes back empty — no org exposing the balance, and neither
+the Admin API nor the Usage & Cost API returning it (verified against both references). Then it is
 anchored by hand and measured spend is subtracted from it:
 
 ```
@@ -169,8 +184,12 @@ ccredit cal 1.37      # set the calibration by hand
 ccredit source live   # back to the fetched balance
 ```
 
-`HINT=on` in `~/.claude/credit-config` adds the live balance to the end of line 1 while the plan
-meters are showing. Off by default, for the same reason: a subscription bar should look untouched.
+`HINT=on` in `~/.claude/credit-config` adds the balance to the end of line 1 while the plan meters
+are showing — the live one on `SOURCE=live`, the hand anchor on `SOURCE=manual`, marked `~` there
+because it is an estimate. Line 2 is untouched either way, so the reserve is in view without costing
+you the quota meters. Off by default, for the same reason: a subscription bar should look untouched.
+The tail and the row read the same `manual_calc`, so they can never disagree about how much is left;
+`MODE=quota` silences both.
 
 **On a subscription this row stays away.** Console credits are only ever drawn on when Claude Code
 is *not* running against a plan, and a plan session always carries at least one `rate_limits`

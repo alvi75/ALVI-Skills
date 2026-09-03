@@ -152,6 +152,34 @@ printf "${MANCFG}MODE=quota\n" > "$HOME/.claude/credit-config"
 o=$(line2 "$NORL");           assert_has "MODE=quota silences it even off-plan" "$o" "Context: 13%"
 printf 'SOURCE=manual\nMODE=credits\n' > "$HOME/.claude/credit-config"
 o=$(line2 "$SUB");            assert_has "manual with no anchor falls through" "$o" "Session: 16%"
+# HINT=on puts the hand-anchored reserve on line 1 as a tail, WITHOUT the row
+# taking over line 2 - the plan is still what is paying, so the quota meters
+# must survive. The figure and its '~' marker come from the same manual_calc
+# the row itself would use, so a tail and a row can never disagree.
+printf "${MANCFG}HINT=on\n" > "$HOME/.claude/credit-config"
+o=$(line1 "$SUB");            assert_has "HINT=on + manual -> line-1 tail" "$o" '· credits ~$0.35'
+o=$(line2 "$SUB");            assert_has "the tail does not cost us the quota meters" "$o" "Session: 16%"
+                              assert_not "line 2 still carries no dollars" "$o" '$'
+o=$(line1 "$NORL");           assert_not "off-plan the row owns it; no duplicate tail" "$o" "credits"
+o=$(line2 "$NORL");           assert_has "off-plan the row is still the row" "$o" 'Credits: ~$0.35 left'
+printf "${MANCFG}HINT=on\nMODE=quota\n" > "$HOME/.claude/credit-config"
+o=$(line1 "$SUB");            assert_not "MODE=quota silences the tail too" "$o" "credits"
+printf 'SOURCE=manual\nHINT=on\n' > "$HOME/.claude/credit-config"
+o=$(line1 "$SUB");            assert_not "no anchor -> no tail, never an invented $0.00" "$o" "credits"
+# A fresh, non-zero live balance replaces the hand estimate: real server number,
+# no '~', falls as you spend and jumps on a top-up without re-anchoring. Zero
+# must NOT take over - an empty claude.ai pool says nothing about the Console
+# pool, and showing $0.00 would erase a reserve that is actually there.
+printf "${MANCFG}HINT=on\n" > "$HOME/.claude/credit-config"
+live ok "$NOW" 324 0 4000 1 0 900 "$((NOW-3600))" USD
+o=$(line1 "$SUB");            assert_has "live balance beats the anchor, unmarked" "$o" '· credits $3.24'
+                              assert_not "no estimate marker once it is a real number" "$o" '~$3.24'
+o=$(line2 "$NORL");           assert_has "off-plan the row shows the live figure too" "$o" 'Credits: $3.24 left'
+live ok "$NOW" 0 0 4000 0 0 0 "" USD
+o=$(line1 "$SUB");            assert_has "a zero live pool keeps the anchor" "$o" '· credits ~$0.35'
+live ok "$((NOW-3600))" 324 0 4000 1 0 900 "" USD
+o=$(line1 "$SUB");            assert_has "a stale live balance keeps the anchor" "$o" '· credits ~$0.35'
+rm -f "$HOME/.claude/credit-live"
 printf 'SOURCE=live\nBALANCE=0.35\nBALANCE_AT=2026-09-02T00:00:00Z\n' > "$HOME/.claude/credit-config"
 o=$(line2 "$SUB");            assert_has "SOURCE=live keeps the plan meters in front" "$o" "Session: 16%"
 o=$(line2 "$NORL");           assert_has "SOURCE=live off-plan still shows the anchor" "$o" 'Credits: ~$0.35 left'
@@ -159,8 +187,11 @@ rm -f "$HOME/.claude/credit-config" "$HOME/.claude/credit-live"
 rm -f "$T/spawn.log"; cp "$SL" "$HOME/.claude/statusline.sh"
 printf '#!/bin/sh\necho spawned >> "$SPAWN_LOG"\n' > "$HOME/.claude/credit-balance.sh"; chmod +x "$HOME/.claude/credit-balance.sh"
 printf 'SOURCE=manual\nBALANCE=0.35\nBALANCE_AT=2026-09-02T00:00:00Z\n' > "$HOME/.claude/credit-config"
+# SOURCE=manual DOES fetch. Excluding it looked like a saved network call, but
+# it also meant nothing ever discovered which org holds the Console pool, so the
+# hand anchor could only drift. The fetch is what replaces the estimate.
 export SPAWN_LOG="$T/spawn.manual.log"; render "$SUB" >/dev/null; sleep 1
-[ ! -f "$SPAWN_LOG" ] && ok "SOURCE=manual never fetches" || bad "SOURCE=manual spawned the fetcher"
+[ -f "$SPAWN_LOG" ] && ok "SOURCE=manual fetches, so the org can be discovered" || bad "SOURCE=manual did not spawn the fetcher"
 rm -f "$HOME/.claude/credit-balance.sh" "$HOME/.claude/credit-config"
 
 echo "renderer: legacy hand-anchored row is unchanged for API-key auth"
@@ -397,7 +428,17 @@ printf '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-SECRETSECRET","expiresAt":
 : > "$CURL_LOG"; run_fetch; c=$(cat "$HOME/.claude/credit-live")
 assert_has "expired token -> expired, no request" "$c" "expired|"; assert_eq "expired -> curl not called" "$(cat "$CURL_LOG")" ""
 : > "$T/creds.json"; run_fetch; c=$(cat "$HOME/.claude/credit-live")
-assert_has "empty keychain -> noauth" "$c" "noauth|"
+assert_has "empty keychain -> nocreds" "$c" "nocreds|"
+# A readable item of the WRONG SHAPE is its own cause. It used to report noauth
+# like a missing one, which is what made a working Keychain read look like an
+# auth failure for a whole session. The reason field carries top-level KEY
+# NAMES so the new shape is diagnosable - and it must never carry a value.
+printf '{"someOtherShape":{"token":"sk-ant-oat01-SECRETSECRET"}}' > "$T/creds.json"
+: > "$CURL_LOG"; run_fetch; c=$(cat "$HOME/.claude/credit-live")
+assert_has "readable but wrong shape -> notoken" "$c" "notoken|"
+assert_has "notoken records the key names" "$c" "keys_someOtherShape"
+assert_not "the reason never leaks a token" "$c" "SECRET"
+assert_eq "wrong shape -> curl not called" "$(cat "$CURL_LOG")" ""
 printf '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-SECRETSECRET","expiresAt":%s}}' "$future" > "$T/creds.json"
 printf '{"oauthAccount":{"organizationUuid":"../../evil"}}' > "$HOME/.claude.json"
 : > "$CURL_LOG"; run_fetch; c=$(cat "$HOME/.claude/credit-live")
