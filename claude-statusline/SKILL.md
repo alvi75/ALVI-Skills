@@ -24,7 +24,7 @@ and spend-limit rows are Bash-only (see Known limits).
 | `${CLAUDE_SKILL_DIR}/assets/statusline.ps1` | Windows | PowerShell 5.1, nothing else |
 | `${CLAUDE_SKILL_DIR}/assets/statusline.sh` | macOS, Linux, Git Bash | `jq` |
 | `${CLAUDE_SKILL_DIR}/assets/test-statusline.ps1` | Windows | runs the suite against either layout |
-| `${CLAUDE_SKILL_DIR}/assets/test-statusline.sh` | macOS, Linux | 175 checks: renderer rows, credit fetcher (Keychain and API shimmed), `ccredit` |
+| `${CLAUDE_SKILL_DIR}/assets/test-statusline.sh` | macOS, Linux | 183 checks: renderer rows, credit fetcher (Keychain and API shimmed), `ccredit` |
 | `${CLAUDE_SKILL_DIR}/assets/credit-balance.sh` | macOS, Linux | fetches the **live** usage-credit balance for a claude.ai login; run detached, never on the render path |
 | `${CLAUDE_SKILL_DIR}/assets/ccredit` | macOS, Linux | shows the balance, forces or hides the row, sets the bar's reference total |
 | `${CLAUDE_SKILL_DIR}/assets/credit-spend.sh` | macOS, Linux | Console API-key billing only: fetches real billed spend for the hand-anchored meter |
@@ -63,7 +63,7 @@ The second row picks the first of these that applies, so it is never blank:
 
 | # | Condition | Row |
 | --- | --- | --- |
-| 0 | `SOURCE=manual`, an anchor is set, and `MODE` is not `quota` | the hand-anchored credit meter |
+| 0 | `SOURCE=manual`, an anchor is set, `MODE` is not `quota`, and the payload carries **no** `rate_limits` window | the hand-anchored credit meter |
 | 1 | usage credits are **in use**: `~/.claude/credit-live` holds a balance, extra usage is not disabled, and either the balance fell within the last 10 min or a plan window is at 100%; or `ccredit mode credits` | the live credit meter |
 | 2 | `rate_limits.five_hour` or `.seven_day` present | the two quota meters |
 | 3 | only `rate_limits.spend_limit` present (gateway) | one spend-limit meter |
@@ -169,10 +169,15 @@ ccredit cal 1.37      # set the calibration by hand
 ccredit source live   # back to the fetched balance
 ```
 
-**`source manual` is what makes the row visible.** The hand-anchored row used to sit *behind* the
-plan meters in the selection order, and a claude.ai payload always carries those — so on a
-subscription that branch was unreachable and the row never appeared, however carefully the balance
-was anchored. On `manual` the row goes in front of them, and nothing is fetched.
+`HINT=on` in `~/.claude/credit-config` adds the live balance to the end of line 1 while the plan
+meters are showing. Off by default, for the same reason: a subscription bar should look untouched.
+
+**On a subscription this row stays away.** Console credits are only ever drawn on when Claude Code
+is *not* running against a plan, and a plan session always carries at least one `rate_limits`
+window — so the absence of every window is the signal that this money is moving. While the plan is
+paying, the bar is exactly the two quota meters it has always been: no dollars, no credit hint, no
+change of any kind. `MODE=credits` forces the row on for testing; `MODE=quota` silences it
+everywhere.
 
 Only the balance is manual; the subtraction is continuous. Both derived stores
 (`credit-ledger.d/` and the cached billed total) measure spend *since* the anchor, so `ccredit`

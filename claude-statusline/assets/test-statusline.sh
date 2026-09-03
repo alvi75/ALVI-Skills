@@ -29,6 +29,7 @@ assert_eq()  { [ "$2" = "$3" ] && ok "$1" || bad "$1" "got <$2> want <$3>"; }
 NOW=$(date +%s)
 SUB='{"model":{"display_name":"Opus 5"},"workspace":{"current_dir":"/tmp/proj"},"context_window":{"used_percentage":13,"total_input_tokens":128000,"context_window_size":1000000},"cost":{"total_cost_usd":1.5,"total_duration_ms":90000},"session_id":"abc","rate_limits":{"five_hour":{"used_percentage":16,"resets_at":'$((NOW+5460))'},"seven_day":{"used_percentage":8,"resets_at":'$((NOW+430000))'}}}'
 SUB100=$(printf '%s' "$SUB" | sed 's/"used_percentage":16/"used_percentage":100/')
+GW='{"model":{"display_name":"Opus 5"},"workspace":{"current_dir":"/tmp/proj"},"context_window":{"used_percentage":13,"total_input_tokens":128000,"context_window_size":1000000},"cost":{"total_cost_usd":1.5,"total_duration_ms":90000},"session_id":"abc","rate_limits":{"spend_limit":{"used_percentage":62,"resets_at":'$((NOW+300000))'}}}'
 NORL='{"model":{"display_name":"Opus 5"},"workspace":{"current_dir":"/tmp/proj"},"context_window":{"used_percentage":13,"total_input_tokens":128000,"context_window_size":1000000},"cost":{"total_cost_usd":1.5,"total_duration_ms":90000},"session_id":"abc"}'
 render() { printf '%s' "$1" | /bin/bash "$HOME/.claude/statusline.sh" --layout meters 2>/dev/null | strip; }
 line2()  { render "$1" | sed -n 2p; }
@@ -49,7 +50,10 @@ o=$(line1 "$SUB");            assert_not "credit row active -> no line-1 hint" "
 
 live ok "$NOW" 35 3965 10000 1 0 4000 "$((NOW-3600))" USD
 o=$(line2 "$SUB");            assert_has "old drop -> back to quota row" "$o" "Session: 16%"
-o=$(line1 "$SUB");            assert_has "old drop -> line-1 hint" "$o" '· credits $0.35'
+o=$(line1 "$SUB");            assert_not "subscription bar carries no credit hint" "$o" "credits"
+printf 'HINT=on\n' > "$HOME/.claude/credit-config"
+o=$(line1 "$SUB");            assert_has "HINT=on brings the hint back" "$o" '· credits $0.35'
+rm -f "$HOME/.claude/credit-config"
 o=$(line2 "$SUB100");         assert_has "5h at 100% -> credit row" "$o" 'Credits:'
 
 live ok "$NOW" 35 3965 10000 0 0 4000 "$((NOW-30))" USD
@@ -90,7 +94,9 @@ o=$(line2 "$SUB");            assert_has "fetch >5min old -> ~ marker" "$o" 'Cre
 live http_500 "$NOW" 35 3965 10000 1 0 4000 "$((NOW-30))" USD
 o=$(line2 "$SUB");            assert_has "failed refresh, carried numbers -> ~" "$o" 'Credits: ~$0.35 left of $40.00'
 live http_500 "$NOW" 35 3965 10000 1 0 4000 "$((NOW-3600))" USD
+printf 'HINT=on\n' > "$HOME/.claude/credit-config"
 o=$(line1 "$SUB");            assert_has "line-1 hint carries the ~ too" "$o" '· credits ~$0.35'
+rm -f "$HOME/.claude/credit-config"
 live ok "$NOW" 99999999999999999999 0 "" 1 0 99999999999999999999 "$((NOW-30))" USD
 o=$(render "$SUB");           assert_not "20-digit cents rejected, no credit row" "$o" 'Credits:'
 live ok "$NOW" 35 "" "" 1 1 4000 "$((NOW-30))" USD
@@ -127,20 +133,28 @@ o=$(COLUMNS=40 line2 "$SUB");  assert_has "40 cols -> tier 2 label" "$o" '$0.35'
                                assert_has "40 cols -> percent on the right" "$o" '99%'
 o=$(COLUMNS=20 render "$SUB"); n=$(printf '%s\n' "$o" | grep -c .); [ "$n" -ge 2 ] && ok "20 cols still 2 lines" || bad "20 cols lines=$n"
 
-echo "renderer: SOURCE=manual puts the hand anchor in front of the plan meters"
+echo "renderer: on a subscription the bar is EXACTLY the two quota meters"
 rm -f "$HOME/.claude/credit-live"
-printf 'SOURCE=manual\nBALANCE=0.35\nBALANCE_AT=2026-09-02T00:00:00Z\nCAL=1.0\n' > "$HOME/.claude/credit-config"
-o=$(line2 "$SUB");            assert_has "manual row beats the quota row" "$o" 'Credits: ~$0.35 left'
-o=$(line1 "$SUB");            assert_not "manual row -> no live hint" "$o" "credits"
+MANCFG='SOURCE=manual\nBALANCE=0.35\nBALANCE_AT=2026-09-02T00:00:00Z\nCAL=1.0\n'
+printf "$MANCFG" > "$HOME/.claude/credit-config"
+o=$(line2 "$SUB");            assert_has "plan windows present -> quota row, not credits" "$o" "Session: 16%"
+                              assert_not "no dollars anywhere on line 2" "$o" '$'
+o=$(line1 "$SUB");            assert_not "no dollars anywhere on line 1" "$o" '$'
+o=$(line2 "$SUB100");         assert_has "even a spent 5h window keeps the quota row" "$o" "Session: 100%"
 live ok "$NOW" 0 0 4000 0 0 0 "" USD
-o=$(line2 "$SUB");            assert_has "manual ignores a live cache of \$0" "$o" 'Credits: ~$0.35 left'
-o=$(line1 "$SUB");            assert_not "manual -> no 'no credits' hint" "$o" "no credits"
-printf 'SOURCE=manual\nMODE=quota\nBALANCE=0.35\nBALANCE_AT=2026-09-02T00:00:00Z\n' > "$HOME/.claude/credit-config"
-o=$(line2 "$SUB");            assert_has "MODE=quota still wins over manual" "$o" "Session: 16%"
+o=$(line2 "$SUB");            assert_has "a live cache changes nothing on manual" "$o" "Session: 16%"
+o=$(line2 "$GW");             assert_has "gateway spend_limit still owns its row" "$o" "Spend limit:"
+                              assert_not "gateway -> no hand-anchored dollars" "$o" '~$0.35'
+o=$(line2 "$NORL");           assert_has "no plan windows -> the credit row appears" "$o" 'Credits: ~$0.35 left'
+printf "${MANCFG}MODE=credits\n" > "$HOME/.claude/credit-config"
+o=$(line2 "$SUB");            assert_has "MODE=credits forces it on a subscription" "$o" 'Credits: ~$0.35 left'
+printf "${MANCFG}MODE=quota\n" > "$HOME/.claude/credit-config"
+o=$(line2 "$NORL");           assert_has "MODE=quota silences it even off-plan" "$o" "Context: 13%"
 printf 'SOURCE=manual\nMODE=credits\n' > "$HOME/.claude/credit-config"
 o=$(line2 "$SUB");            assert_has "manual with no anchor falls through" "$o" "Session: 16%"
 printf 'SOURCE=live\nBALANCE=0.35\nBALANCE_AT=2026-09-02T00:00:00Z\n' > "$HOME/.claude/credit-config"
 o=$(line2 "$SUB");            assert_has "SOURCE=live keeps the plan meters in front" "$o" "Session: 16%"
+o=$(line2 "$NORL");           assert_has "SOURCE=live off-plan still shows the anchor" "$o" 'Credits: ~$0.35 left'
 rm -f "$HOME/.claude/credit-config" "$HOME/.claude/credit-live"
 rm -f "$T/spawn.log"; cp "$SL" "$HOME/.claude/statusline.sh"
 printf '#!/bin/sh\necho spawned >> "$SPAWN_LOG"\n' > "$HOME/.claude/credit-balance.sh"; chmod +x "$HOME/.claude/credit-balance.sh"
@@ -289,8 +303,11 @@ assert_eq "real response: ok" "$st" ok; assert_eq "balance 0" "$bal" 0; assert_e
 assert_eq "limit 4000" "$lim" 4000; assert_eq "disabled" "$en" 0; assert_eq "reason captured" "$why" out_of_credits
 assert_eq "decimals captured" "$dp" 2; assert_eq "null auto_reload -> 0" "$ar" 0
 o=$(line2 "$SUB");            assert_has "out of credits -> not in use, quota row" "$o" "Session: 16%"
-o=$(line1 "$SUB");            assert_has "out of credits -> line-1 says so" "$o" "· no credits"
+o=$(line1 "$SUB");            assert_not "out of credits -> silent on a subscription" "$o" "credits"
+printf 'HINT=on\n' > "$HOME/.claude/credit-config"
+o=$(line1 "$SUB");            assert_has "HINT=on -> line-1 says out of credits" "$o" "· no credits"
                               assert_not "out of credits -> no bare \$0.00" "$o" 'credits $0.00'
+rm -f "$HOME/.claude/credit-config"
 printf 'MODE=credits\n' > "$HOME/.claude/credit-config"
 o=$(line2 "$SUB");            assert_has "forced row names the state" "$o" "Credits: out of credits"
                               assert_has "forced row says what to do" "$o" "top up"

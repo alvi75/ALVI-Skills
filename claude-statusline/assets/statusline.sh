@@ -141,31 +141,26 @@ meter() {
 # already cached and spawns it detached when that is older than 60 s, so the
 # render path never waits on the network. Fields are documented in that file.
 LIVE_F="$HOME/.claude/credit-live"
-CRMODE=auto; CRWIN=600; LEGACY=0; CRSRC=live
+CRMODE=auto; CRWIN=600; LEGACY=0; CRSRC=live; CRHINT=0
 if [ -f "$HOME/.claude/credit-config" ]; then
     # One awk, not sed+sed+grep: this runs on every render. Quotes and CR are
     # tolerated. BALANCE_AT marks the hand-anchored (API-key) meter; MODE/TOTAL
     # alone do not.
-    IFS='|' read -r _m _w LEGACY _s <<EOF
+    IFS='|' read -r _m _w LEGACY _s CRHINT <<EOF
 $(awk -F= '{ sub(/\r$/,""); v=$2; gsub(/^["[:space:]]+|["[:space:]]+$/,"",v) }
     $1=="MODE" && v ~ /^(auto|credits|quota)$/ { m=v }
     $1=="ACTIVE_WINDOW" && v ~ /^[0-9]{1,9}$/ { w=v }
     $1=="SOURCE" && v ~ /^(live|manual)$/ { s=v }
+    $1=="HINT" && v ~ /^(on|1|true|yes)$/ { h=1 }
     $1=="BALANCE_AT" { l=1 }
-    END { printf "%s|%s|%d|%s", m, w, l, s }' "$HOME/.claude/credit-config" 2>/dev/null)
+    END { printf "%s|%s|%d|%s|%d", m, w, l, s, h }' "$HOME/.claude/credit-config" 2>/dev/null)
 EOF
     [ -n "$_m" ] && CRMODE="$_m"
     [ -n "$_w" ] && CRWIN="$_w"
     [ -n "$_s" ] && CRSRC="$_s"
     case "$LEGACY" in 1) ;; *) LEGACY=0 ;; esac
+    case "$CRHINT" in 1) ;; *) CRHINT=0 ;; esac
 fi
-# SOURCE=manual: the balance is hand-anchored (Console prepaid credits, which no
-# endpoint exposes) rather than fetched. It then owns the row outright - it must
-# not sit behind the plan meters the way the old fallback did, because a
-# subscription payload always carries those, so that branch was unreachable and
-# the row never appeared. That was the whole reason this was invisible before.
-MANUAL=0
-[ "$CRSRC" = manual ] && [ "$LEGACY" = 1 ] && [ "$CRMODE" != quota ] && MANUAL=1
 LIVE_OK=0; LIVE_STALE=1; LIVE_AGE=999999
 LST=""; LBAL=""; LUSED=""; LLIM=""; LEN=""; LAR=""; LTOT=""; LDROP=""; LCUR=""; LWHY=""; LDP=""
 if [ -f "$LIVE_F" ]; then
@@ -204,6 +199,17 @@ has5=0; has7=0; hasS=0
 case "$P5" in ''|*[!0-9.]*) ;; *) has5=1 ;; esac
 case "$P7" in ''|*[!0-9.]*) ;; *) has7=1 ;; esac
 case "$PS" in ''|*[!0-9.]*) ;; *) hasS=1 ;; esac
+# SOURCE=manual: the balance is hand-anchored (Console prepaid credits, which no
+# endpoint exposes). That pool is only ever drawn on when Claude Code is NOT
+# running against a plan - and a plan session always carries at least one
+# rate_limits window - so the absence of every window is the signal that this
+# money is moving. On a subscription the row stays away and the bar is exactly
+# the two quota meters it has always been. MODE=credits overrides for testing.
+MANUAL=0
+if [ "$CRSRC" = manual ] && [ "$LEGACY" = 1 ] && [ "$CRMODE" != quota ]; then
+    if [ "$CRMODE" = credits ]; then MANUAL=1
+    elif [ "$has5" = 0 ] && [ "$has7" = 0 ] && [ "$hasS" = 0 ]; then MANUAL=1; fi
+fi
 CR_ACTIVE=0
 if [ "$CRSRC" = manual ]; then CR_ACTIVE=0
 elif [ "$CRMODE" = credits ]; then CR_ACTIVE=1
@@ -274,7 +280,11 @@ if [ "$LAYOUT" = meters ]; then
     # on line 1, so a top-up landing (or running dry) is visible without the
     # meter taking over line 2. Dropped first when the width runs out.
     hint=""
-    if [ "$LIVE_OK" = 1 ] && [ "$CR_ACTIVE" = 0 ] && [ "$CRSRC" != manual ]; then
+    # Off by default. On a subscription the bar must look exactly as it did
+    # before any of this existed, and a balance appended to line 1 is still a
+    # credit thing on a screen that should have none. HINT=on in credit-config
+    # brings it back for anyone who wants the reserve in view.
+    if [ "$CRHINT" = 1 ] && [ "$LIVE_OK" = 1 ] && [ "$CR_ACTIVE" = 0 ] && [ "$CRSRC" != manual ]; then
         _m=""; [ "$LIVE_STALE" = 1 ] && _m="~"
         if [ "$OUT" = 1 ]; then hint=" ${DOT} no credits"
         else hint=" ${DOT} credits ${_m}\$$(cents "$LBAL")"; fi
@@ -543,7 +553,9 @@ elif [ "$LAYOUT" = meters ] && [ "$hasS" = 1 ]; then
         [ "$W" -gt "$METER_W" ] && W=$METER_W
     done
     printf '%s\n' "${scol}${SEL}${R}  $(meter "$psf" "$W")"
-elif [ "$LAYOUT" = meters ] && [ "$LEGACY" = 1 ]; then
+elif [ "$LAYOUT" = meters ] && [ "$LEGACY" = 1 ] && [ "$CRMODE" != quota ]; then
+    # API-key auth with no plan windows at all: dollars are the only meter there
+    # is. MODE=quota opts out of that too and falls through to the context bar.
     manual_row
 else
     MSI=$(int "$MS"); MINS=$(( MSI / 60000 )); SECS=$(( (MSI % 60000) / 1000 ))
