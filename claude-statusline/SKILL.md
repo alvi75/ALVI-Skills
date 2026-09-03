@@ -24,7 +24,7 @@ and spend-limit rows are Bash-only (see Known limits).
 | `${CLAUDE_SKILL_DIR}/assets/statusline.ps1` | Windows | PowerShell 5.1, nothing else |
 | `${CLAUDE_SKILL_DIR}/assets/statusline.sh` | macOS, Linux, Git Bash | `jq` |
 | `${CLAUDE_SKILL_DIR}/assets/test-statusline.ps1` | Windows | runs the suite against either layout |
-| `${CLAUDE_SKILL_DIR}/assets/test-statusline.sh` | macOS, Linux | 142 checks: renderer rows, credit fetcher (Keychain and API shimmed), `ccredit` |
+| `${CLAUDE_SKILL_DIR}/assets/test-statusline.sh` | macOS, Linux | 169 checks: renderer rows, credit fetcher (Keychain and API shimmed), `ccredit` |
 | `${CLAUDE_SKILL_DIR}/assets/credit-balance.sh` | macOS, Linux | fetches the **live** usage-credit balance for a claude.ai login; run detached, never on the render path |
 | `${CLAUDE_SKILL_DIR}/assets/ccredit` | macOS, Linux | shows the balance, forces or hides the row, sets the bar's reference total |
 | `${CLAUDE_SKILL_DIR}/assets/credit-spend.sh` | macOS, Linux | Console API-key billing only: fetches real billed spend for the hand-anchored meter |
@@ -63,10 +63,11 @@ The second row picks the first of these that applies, so it is never blank:
 
 | # | Condition | Row |
 | --- | --- | --- |
+| 0 | `SOURCE=manual`, an anchor is set, and `MODE` is not `quota` | the hand-anchored credit meter |
 | 1 | usage credits are **in use**: `~/.claude/credit-live` holds a balance, extra usage is not disabled, and either the balance fell within the last 10 min or a plan window is at 100%; or `ccredit mode credits` | the live credit meter |
 | 2 | `rate_limits.five_hour` or `.seven_day` present | the two quota meters |
 | 3 | only `rate_limits.spend_limit` present (gateway) | one spend-limit meter |
-| 4 | no `rate_limits`, and `~/.claude/credit-config` carries a hand anchor (`BALANCE_AT`) | the hand-anchored credit meter (API-key billing) |
+| 4 | no `rate_limits`, and `~/.claude/credit-config` carries a hand anchor (`BALANCE_AT`) | the hand-anchored credit meter (API-key auth, no plan) |
 | 5 | otherwise | the context meter |
 
 Row 1 exists because the plan meters say nothing once a window is exhausted and extra usage takes
@@ -84,6 +85,18 @@ and a test asserts that. The live credit row shows the server's balance, not an 
 hand-anchored row (API-key billing) shows the estimate because that is all there is.
 
 ## The credit meter
+
+**There are two separate pools, and they hold different amounts.** Getting this wrong is what made
+an earlier version of this meter invisible for a whole session.
+
+| Pool | Where you see it | Readable? |
+| --- | --- | --- |
+| **claude.ai usage credits** — extra usage once a plan window is spent | `/usage-credits`, claude.ai Settings > Usage | Yes, live (below) |
+| **Console prepaid credits** — consumed by API keys, Claude Code and the playground | console.anthropic.com > Billing | **No endpoint exposes it.** Hand-anchored |
+
+An account can hold both, and one being empty says nothing about the other. Check which pool the
+number you care about lives in before wiring anything up: `ccredit orgs` asks every organization
+the login can see and prints what each one reports.
 
 ### claude.ai login with usage credits (the normal case)
 
@@ -103,8 +116,13 @@ never written or printed — `--print` output and the cache are asserted token-f
 The cache is one line at `~/.claude/credit-live` (mode 600):
 
 ```
-status|epoch|balance_c|used_c|limit_c|enabled|autoreload|total_c|drop_epoch|currency
+status|epoch|balance_c|used_c|limit_c|enabled|autoreload|total_c|drop_epoch|currency|reason|decimals
 ```
+
+`reason` carries `extra_usage.disabled_reason`. It earns its place because a zero balance and a
+failed fetch both render as `$0.00`, and only this tells them apart — `out_of_credits` makes the
+row say **out of credits** instead. `decimals` is `extra_usage.decimal_places`: minor units per
+unit is `10^decimals`, so a zero-decimal currency is not divided by 100.
 
 The renderer reads only that file and spawns the fetcher **detached** when it is older than 60 s
 (10 min after an auth-shaped failure, so a logged-out machine is not polled every render). The
@@ -120,6 +138,7 @@ Two derived values the server does not give:
 
 ```bash
 ccredit                 # balance, meter total, this month, auto-reload, freshness, row mode
+ccredit orgs            # which organization holds a balance, and how much
 ccredit refresh         # fetch now and print the raw server answers — run this once after install
 ccredit total 40        # meter against $40  |  ccredit total auto
 ccredit mode credits    # always show the row  |  quota: never (and stop fetching)  |  auto (default)
@@ -132,21 +151,28 @@ failed fetch keeps the previous good balance and marks it, it does not print `$0
 `ccredit` lives at `~/.claude/ccredit`; symlink it onto `PATH` (`ln -sf ~/.claude/ccredit
 ~/.local/bin/ccredit`) or call it by full path — the bare commands above assume the symlink.
 
-### Console API-key billing (no claude.ai login)
+### Console prepaid credits (hand-anchored)
 
-There is no login to ask, and no *public* API returns a balance — not the Admin API, not the Usage
-& Cost API (verified against both references). So the balance is anchored by hand and measured
-spend is subtracted from it:
+No endpoint returns this balance — not the Admin API, not the Usage & Cost API (verified against
+both references), and not the OAuth endpoints above, which report the *other* pool. So it is
+anchored by hand and measured spend is subtracted from it:
 
 ```
 left now  =  the balance you typed  −  (spend since you typed it × calibration)
 ```
 
 ```bash
-ccredit set 35.06     # re-anchor to whatever Console shows; also re-learns the calibration
+ccredit source manual # track this pool instead of the live one
+ccredit set 0.35      # re-anchor to whatever Console shows; also re-learns the calibration
 ccredit topup 20      # add a top-up to the anchor
 ccredit cal 1.37      # set the calibration by hand
+ccredit source live   # back to the fetched balance
 ```
+
+**`source manual` is what makes the row visible.** The hand-anchored row used to sit *behind* the
+plan meters in the selection order, and a claude.ai payload always carries those — so on a
+subscription that branch was unreachable and the row never appeared, however carefully the balance
+was anchored. On `manual` the row goes in front of them, and nothing is fetched.
 
 Only the balance is manual; the subtraction is continuous. Both derived stores
 (`credit-ledger.d/` and the cached billed total) measure spend *since* the anchor, so `ccredit`

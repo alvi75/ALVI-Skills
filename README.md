@@ -74,7 +74,9 @@ Credits: $0.35 left of $40.00  ▕████████████▏  $39.6
 ```
 
 The balance comes from the same undocumented endpoints Claude Code's `/usage-credits` uses, fetched
-detached every 60 s with the login Claude Code already holds. The row takes over line 2 while the
+detached every 60 s with the login Claude Code already holds. **Console prepaid credits are a
+different pool** with a different balance, which no endpoint exposes; `ccredit source manual` tracks
+that one by hand and puts it in front of the plan meters. The row takes over line 2 while the
 balance is falling or a plan window is exhausted, and steps back to the plan meters otherwise, with
 the balance kept as a tail on line 1. A top-up shows up on the next poll. `ccredit` shows, forces or
 hides it. Details in `claude-statusline/SKILL.md`.

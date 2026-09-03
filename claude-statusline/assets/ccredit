@@ -4,6 +4,13 @@
 # claude.ai login (the normal case) - the balance is fetched live, nothing to type:
 #   ccredit                 show the cached balance and how fresh it is
 #   ccredit refresh         fetch now and print the raw server answers (first-time check)
+#   ccredit orgs            which organization holds the balance, and how much
+#
+# Console prepaid credits (console.anthropic.com) are a DIFFERENT pool that no
+# endpoint exposes. Track those by hand - this also puts the row in front of the
+# plan meters, which is the only way it can be seen on a subscription:
+#   ccredit source manual   track the hand-anchored balance instead of the live one
+#   ccredit source live     back to the fetched balance (default)
 #   ccredit total 40        meter against $40 (default: balance after the last top-up seen)
 #   ccredit total auto      back to automatic
 #   ccredit mode credits    always show the credit row on line 2
@@ -61,21 +68,32 @@ relearn() {
 
 show_live() {
     if [ ! -f "$LIVE" ]; then
+        if [ "$(getk SOURCE)" = manual ]; then
+            printf 'source       manual (hand-anchored)\n'
+            printf 'hand anchor  $%s as of %s (calibration %sx)\n' "$BALANCE" "$BALANCE_AT" "$CAL"
+            printf 'row mode     %s\n' "$(getk MODE)"; return
+        fi
         echo "no live balance yet - run: ccredit refresh"; return
     fi
-    IFS='|' read -r st ts bal used lim en ar tot drop cur < "$LIVE"
+    IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$LIVE"
     age=$(( $(date +%s) - ${ts:-0} ))
-    d() { awk -v c="$1" 'BEGIN{printf "%.2f", c/100}'; }
+    case "$dp" in 0|1|2|3|4) ;; *) dp=2 ;; esac
+    d() { awk -v c="$1" -v n="$dp" 'BEGIN{p=1; for(i=0;i<n;i++) p*=10; printf "%." n "f", c/p}'; }
     if [ -n "$bal" ]; then
         printf 'balance      $%s %s\n' "$(d "$bal")" "${cur:-USD}"
         printf 'meter total  $%s (%s)\n' "$(d "${tot:-$bal}")" "$( [ -n "$(getk TOTAL)" ] && echo "set by hand" || echo "last top-up seen")"
         [ -n "$used" ] && printf 'this month   $%s%s\n' "$(d "$used")" "$( [ -n "$lim" ] && echo " of \$$(d "$lim") limit" || echo " (no monthly limit)")"
-        printf 'extra usage  %s, auto-reload %s\n' "$( [ "$en" = 1 ] && echo on || { [ "$en" = 0 ] && echo off || echo unknown; })" "$( [ "$ar" = 1 ] && echo on || echo off)"
+        printf 'extra usage  %s%s, auto-reload %s\n' "$( [ "$en" = 1 ] && echo on || { [ "$en" = 0 ] && echo off || echo unknown; })" "$( [ -n "$why" ] && printf ' (%s)' "$why" )" "$( [ "$ar" = 1 ] && echo on || echo off)"
         [ -n "$drop" ] && printf 'last drop    %ss ago\n' "$(( $(date +%s) - drop ))"
     fi
     printf 'status       %s, fetched %ss ago\n' "$st" "$age"
     _mode=$(getk MODE); _win=$(getk ACTIVE_WINDOW)
     printf 'row mode     %s (window %ss)\n' "${_mode:-auto}" "${_win:-600}"
+    _src=$(getk SOURCE)
+    printf 'source       %s\n' "${_src:-live}"
+    if [ "${_src:-live}" = manual ]; then
+        printf 'hand anchor  $%s as of %s (calibration %sx)\n' "$BALANCE" "$BALANCE_AT" "$CAL"
+    fi
 }
 
 case "${1:-show}" in
@@ -84,6 +102,9 @@ case "${1:-show}" in
         [ -x "$FETCH" ] || { echo "missing $FETCH" >&2; exit 1; }
         # --print waits for an in-flight fetch itself; never break its lock here.
         "$FETCH" --print ;;
+    orgs)
+        [ -x "$FETCH" ] || { echo "missing $FETCH" >&2; exit 1; }
+        "$FETCH" --orgs ;;
     total)
         case "${2:-}" in
             auto|'') setk TOTAL "" ; echo "meter total: automatic (balance after the last top-up seen)" ;;
@@ -91,6 +112,13 @@ case "${1:-show}" in
                setk TOTAL "$(awk -v n="$2" 'BEGIN{printf "%.2f", n}')"; echo "meter total set to \$$(getk TOTAL)" ;;
         esac
         [ -x "$FETCH" ] && "$FETCH" >/dev/null 2>&1 || true ;;
+    source)
+        case "${2:-}" in
+            live|manual) setk SOURCE "$2"
+                echo "balance source: $2"
+                [ "$2" = manual ] && [ -z "$(getk BALANCE_AT)" ] && echo "next: ccredit set <what Console shows>" || true ;;
+            *) echo "usage: ccredit source {live|manual}" >&2; exit 1 ;;
+        esac ;;
     mode)
         case "${2:-}" in
             auto|credits|quota) setk MODE "$2"; echo "row mode: $2" ;;
@@ -115,5 +143,5 @@ case "${1:-show}" in
         if [ -z "${2:-}" ]; then echo "usage: ccredit cal <factor>" >&2; exit 1; fi
         num "$2" || { echo "usage: ccredit cal <factor>" >&2; exit 1; }
         setk CAL "$(awk -v n="$2" 'BEGIN{printf "%.4f", n}')"; echo "calibration set to $(getk CAL)" ;;
-    *) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

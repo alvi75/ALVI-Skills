@@ -20,13 +20,19 @@
 # anywhere - not to the cache, not to --print output.
 #
 # Cache: one line, U+007C separated, at ~/.claude/credit-live (mode 600):
-#   status|epoch|balance_c|used_c|limit_c|enabled|autoreload|total_c|drop_epoch|currency
+#   status|epoch|balance_c|used_c|limit_c|enabled|autoreload|total_c|drop_epoch|
+#   currency|reason|decimals
 #   status   ok | noauth | expired | nocurl | nojq | http_<code> | badjson
-#   *_c      integer cents; empty when the server sent null
+#   *_c      integer MINOR units; empty when the server sent null
 #   enabled  1/0 = extra_usage.is_enabled
 #   total_c  the bar's reference: balance after the most recent top-up. Bumped
 #            automatically when the balance rises; TOTAL in credit-config overrides.
 #   drop_epoch  last time the balance was seen to FALL - "credits in use" signal.
+#   reason   extra_usage.disabled_reason, e.g. out_of_credits. A zero balance and
+#            a failed fetch both print "$0.00"; this is what tells them apart.
+#   decimals extra_usage.decimal_places - minor units per unit is 10^decimals.
+#            USD is 2; a zero-decimal currency (JPY) is 0, and dividing by 100
+#            there would be wrong by 100x.
 # On any failure the numeric fields of the previous good line are carried
 # forward so the renderer can still show them, marked stale.
 set -uo pipefail
@@ -40,8 +46,9 @@ PRINT=0; [ "${1:-}" = "--print" ] && PRINT=1
 
 # ---- previous state (carried forward on failure; needed for drop/top-up detection)
 p_status=""; p_ts=0; p_bal=""; p_used=""; p_lim=""; p_en=""; p_ar=""; p_total=""; p_drop=""; p_cur=""
+p_reason=""; p_dp=""
 if [ -f "$CACHE" ]; then
-    IFS='|' read -r p_status p_ts p_bal p_used p_lim p_en p_ar p_total p_drop p_cur < "$CACHE" 2>/dev/null
+    IFS='|' read -r p_status p_ts p_bal p_used p_lim p_en p_ar p_total p_drop p_cur p_reason p_dp < "$CACHE" 2>/dev/null
 fi
 # Integer of at most 15 digits: bash 3.2 arithmetic wraps silently past 2^63,
 # and `[ -gt ]` errors out, so a 20-digit field would be kept forever.
@@ -57,13 +64,15 @@ isint "$p_drop"  || p_drop=""
 case "$p_en" in 0|1) ;; *) p_en="" ;; esac
 case "$p_ar" in 0|1) ;; *) p_ar="" ;; esac
 p_cur=$(printf '%s' "$p_cur" | tr -cd 'A-Za-z' | head -c 3)
+p_reason=$(printf '%s' "$p_reason" | tr -cd 'a-z_' | head -c 32)
+case "$p_dp" in 0|1|2|3|4) ;; *) p_dp="" ;; esac
 
 # Atomic write: the status line reads this file on every render, and '>'
 # truncates before it writes, so a reader could otherwise catch it half-written.
-emit() {   # status bal used lim en ar total drop cur
+emit() {   # status bal used lim en ar total drop cur reason decimals
     _t="$CACHE.tmp.$$"
     umask 077
-    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$1" "$(date +%s)" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" > "$_t" 2>/dev/null &&
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$1" "$(date +%s)" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" > "$_t" 2>/dev/null &&
         mv -f "$_t" "$CACHE" 2>/dev/null
     rm -f "$_t" 2>/dev/null
     if [ "$PRINT" = 1 ]; then
@@ -78,7 +87,7 @@ emit() {   # status bal used lim en ar total drop cur
     fi
     exit 0
 }
-fail() { emit "$1" "$p_bal" "$p_used" "$p_lim" "$p_en" "$p_ar" "$p_total" "$p_drop" "$p_cur"; }
+fail() { emit "$1" "$p_bal" "$p_used" "$p_lim" "$p_en" "$p_ar" "$p_total" "$p_drop" "$p_cur" "$p_reason" "$p_dp"; }
 
 # One fetch at a time. Every open session spawns this when the cache goes stale,
 # so without a gate N sessions expiring together fire N requests. mkdir is the
@@ -167,6 +176,30 @@ isint "$EXP" || EXP=0
 ORG=$(jq -r '.oauthAccount.organizationUuid // empty' "$HOME/.claude.json" 2>/dev/null)
 case "$ORG" in *[!0-9a-fA-F-]*|'') fail noauth ;; esac
 
+# --orgs: which organization holds the money. An account can carry more than one
+# balance - the claude.ai usage-credit pool and a Console prepaid pool are
+# different orgs with different amounts - so this asks every org the login can
+# see and prints what each one reports. Diagnostic only: writes no cache.
+if [ "${1:-}" = "--orgs" ]; then
+    get_orgs() {
+        curl -sS --max-time 8 "https://api.anthropic.com/api/oauth/organizations" \
+            -H "Authorization: Bearer $TOKEN" -H 'anthropic-beta: oauth-2025-04-20' \
+            -H 'Content-Type: application/json' -H 'User-Agent: cc-statusline-credit/2.0' 2>/dev/null
+    }
+    printf 'login org (from ~/.claude.json): %s\n\n' "$ORG"
+    _o=$(get_orgs)
+    _list=$(printf '%s' "$_o" | jq -r '(if type=="array" then . else (.organizations // .data // []) end)
+                    | .[] | [(.uuid // .id // ""), (.name // ""), (.organization_type // .billing_type // "")] | @tsv' 2>/dev/null)
+    [ -z "$_list" ] && _list=$(printf '%s\t%s\t%s' "$ORG" "(list unavailable)" "")
+    printf '%s\n' "$_list" | while IFS="$(printf '\t')" read -r _u _n _t; do
+        case "$_u" in ''|*[!0-9a-fA-F-]*) continue ;; esac
+        get "/api/oauth/organizations/$_u/prepaid/credits"
+        printf 'org %s  %s %s\n    prepaid/credits HTTP %s -> %s\n' "$_u" "$_n" "$_t" "$CODE" \
+            "$(printf '%s' "$BODY" | jq -c '{amount,currency,auto_reload_settings}' 2>/dev/null || printf '(non-JSON, %s bytes)' "${#BODY}")"
+    done
+    exit 0
+fi
+
 get() {   # $1 path -> sets BODY and CODE
     _r=$(curl -sS --max-time 8 -w $'\n%{http_code}' "https://api.anthropic.com$1" \
             -H "Authorization: Bearer $TOKEN" \
@@ -186,14 +219,19 @@ AR=$(printf '%s' "$RAW_CREDITS" | jq -r 'if .auto_reload_settings.enabled==true 
 CUR=$(printf '%s' "$RAW_CREDITS" | jq -r '.currency // "USD"' 2>/dev/null | tr -cd 'A-Za-z' | head -c 3)
 
 get "/api/oauth/usage"; CODE2=$CODE; RAW_USAGE=$BODY
-USED=""; LIM=""; EN=""
+USED=""; LIM=""; EN=""; REASON=""; DP=""
 if [ "$CODE2" = 200 ]; then
     USED=$(printf '%s' "$RAW_USAGE" | jq -r 'if (.extra_usage.used_credits|type)=="number" then (.extra_usage.used_credits|floor|tostring) else empty end' 2>/dev/null)
     LIM=$(printf '%s'  "$RAW_USAGE" | jq -r 'if (.extra_usage.monthly_limit|type)=="number" then (.extra_usage.monthly_limit|floor|tostring) else empty end' 2>/dev/null)
     EN=$(printf '%s'   "$RAW_USAGE" | jq -r 'if .extra_usage.is_enabled==true then 1 elif .extra_usage.is_enabled==false then 0 else empty end' 2>/dev/null)
+    # Why extra usage is off. "out_of_credits" is the one worth showing: a $0.00
+    # balance otherwise looks exactly like a fetch that failed.
+    REASON=$(printf '%s' "$RAW_USAGE" | jq -r '.extra_usage.disabled_reason // empty' 2>/dev/null | tr -cd 'a-z_' | head -c 32)
+    DP=$(printf '%s'     "$RAW_USAGE" | jq -r 'if (.extra_usage.decimal_places|type)=="number" then (.extra_usage.decimal_places|floor|tostring) else empty end' 2>/dev/null)
 fi
 isint "$USED" || USED=""
 isint "$LIM"  || LIM=""
+case "$DP" in 0|1|2|3|4) ;; *) DP="$p_dp" ;; esac
 unset TOKEN
 
 # ---- top-up / drop detection against the previous good balance
@@ -211,4 +249,4 @@ if [ -f "$CFG" ]; then
     [ -n "$_cfg_total" ] && TOTAL=$(awk -v t="$_cfg_total" 'BEGIN{printf "%d", t*100+0.5}')
 fi
 
-emit ok "$BAL" "$USED" "$LIM" "$EN" "$AR" "$TOTAL" "$DROP" "${CUR:-USD}"
+emit ok "$BAL" "$USED" "$LIM" "$EN" "$AR" "$TOTAL" "$DROP" "${CUR:-USD}" "$REASON" "$DP"

@@ -33,8 +33,8 @@ NORL='{"model":{"display_name":"Opus 5"},"workspace":{"current_dir":"/tmp/proj"}
 render() { printf '%s' "$1" | /bin/bash "$HOME/.claude/statusline.sh" --layout meters 2>/dev/null | strip; }
 line2()  { render "$1" | sed -n 2p; }
 line1()  { render "$1" | sed -n 1p; }
-# live cache writer: status ts bal used lim en ar tot drop cur
-live() { printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$@" > "$HOME/.claude/credit-live"; }
+# live cache writer: status ts bal used lim en ar tot drop cur [reason] [decimals]
+live() { printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$@" "" "" > "$HOME/.claude/credit-live"; }
 
 echo "renderer: row selection"
 rm -f "$HOME/.claude/credit-live" "$HOME/.claude/credit-config"
@@ -127,6 +127,28 @@ o=$(COLUMNS=40 line2 "$SUB");  assert_has "40 cols -> tier 2 label" "$o" '$0.35'
                                assert_has "40 cols -> percent on the right" "$o" '99%'
 o=$(COLUMNS=20 render "$SUB"); n=$(printf '%s\n' "$o" | grep -c .); [ "$n" -ge 2 ] && ok "20 cols still 2 lines" || bad "20 cols lines=$n"
 
+echo "renderer: SOURCE=manual puts the hand anchor in front of the plan meters"
+rm -f "$HOME/.claude/credit-live"
+printf 'SOURCE=manual\nBALANCE=0.35\nBALANCE_AT=2026-09-02T00:00:00Z\nCAL=1.0\n' > "$HOME/.claude/credit-config"
+o=$(line2 "$SUB");            assert_has "manual row beats the quota row" "$o" 'Credits: ~$0.35 left'
+o=$(line1 "$SUB");            assert_not "manual row -> no live hint" "$o" "credits"
+live ok "$NOW" 0 0 4000 0 0 0 "" USD
+o=$(line2 "$SUB");            assert_has "manual ignores a live cache of \$0" "$o" 'Credits: ~$0.35 left'
+o=$(line1 "$SUB");            assert_not "manual -> no 'no credits' hint" "$o" "no credits"
+printf 'SOURCE=manual\nMODE=quota\nBALANCE=0.35\nBALANCE_AT=2026-09-02T00:00:00Z\n' > "$HOME/.claude/credit-config"
+o=$(line2 "$SUB");            assert_has "MODE=quota still wins over manual" "$o" "Session: 16%"
+printf 'SOURCE=manual\nMODE=credits\n' > "$HOME/.claude/credit-config"
+o=$(line2 "$SUB");            assert_has "manual with no anchor falls through" "$o" "Session: 16%"
+printf 'SOURCE=live\nBALANCE=0.35\nBALANCE_AT=2026-09-02T00:00:00Z\n' > "$HOME/.claude/credit-config"
+o=$(line2 "$SUB");            assert_has "SOURCE=live keeps the plan meters in front" "$o" "Session: 16%"
+rm -f "$HOME/.claude/credit-config" "$HOME/.claude/credit-live"
+rm -f "$T/spawn.log"; cp "$SL" "$HOME/.claude/statusline.sh"
+printf '#!/bin/sh\necho spawned >> "$SPAWN_LOG"\n' > "$HOME/.claude/credit-balance.sh"; chmod +x "$HOME/.claude/credit-balance.sh"
+printf 'SOURCE=manual\nBALANCE=0.35\nBALANCE_AT=2026-09-02T00:00:00Z\n' > "$HOME/.claude/credit-config"
+export SPAWN_LOG="$T/spawn.manual.log"; render "$SUB" >/dev/null; sleep 1
+[ ! -f "$SPAWN_LOG" ] && ok "SOURCE=manual never fetches" || bad "SOURCE=manual spawned the fetcher"
+rm -f "$HOME/.claude/credit-balance.sh" "$HOME/.claude/credit-config"
+
 echo "renderer: legacy hand-anchored row is unchanged for API-key auth"
 rm -f "$HOME/.claude/credit-live"
 printf 'BALANCE=35.30\nBALANCE_AT=2026-09-02T00:00:00Z\nCAL=1.0\n' > "$HOME/.claude/credit-config"
@@ -204,7 +226,7 @@ rm -f "$HOME/.claude/credit-live" "$HOME/.claude/credit-config"
 
 run_fetch; c=$(cat "$HOME/.claude/credit-live")
 assert_has "first fetch: ok + balance 4000c + total 4000c" "$c" "ok|"
-IFS='|' read -r st ts bal used lim en ar tot drop cur < "$HOME/.claude/credit-live"
+IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$HOME/.claude/credit-live"
 assert_eq "bal" "$bal" 4000; assert_eq "used" "$used" 0; assert_eq "lim" "$lim" 10000
 assert_eq "enabled" "$en" 1; assert_eq "autoreload" "$ar" 0; assert_eq "total=bal on first sight" "$tot" 4000
 assert_eq "no drop yet" "$drop" ""; assert_eq "currency" "$cur" USD
@@ -219,56 +241,80 @@ assert_has "--print shows cache" "$p" "cache: ok|"
 
 echo "fetcher: drop and top-up detection"
 printf '{"amount":3965,"currency":"USD","auto_reload_settings":{"enabled":false}}' > "$FIX_CREDITS"
-run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur < "$HOME/.claude/credit-live"
+run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$HOME/.claude/credit-live"
 assert_eq "balance fell -> bal" "$bal" 3965; assert_eq "total kept" "$tot" 4000
 [ -n "$drop" ] && [ $(( $(date +%s) - drop )) -le 2 ] && ok "drop stamped now" || bad "drop not stamped: <$drop>"
 d1="$drop"; sleep 1
-run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur < "$HOME/.claude/credit-live"
+run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$HOME/.claude/credit-live"
 assert_eq "unchanged balance keeps old drop stamp" "$drop" "$d1"
 printf '{"amount":6000,"currency":"USD","auto_reload_settings":{"enabled":true}}' > "$FIX_CREDITS"
-run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur < "$HOME/.claude/credit-live"
+run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$HOME/.claude/credit-live"
 assert_eq "top-up -> total resets to new balance" "$tot" 6000; assert_eq "auto-reload on" "$ar" 1
 assert_eq "top-up keeps drop stamp" "$drop" "$d1"
 printf 'TOTAL=40\n' > "$HOME/.claude/credit-config"
-run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur < "$HOME/.claude/credit-live"
+run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$HOME/.claude/credit-live"
 assert_eq "TOTAL in config overrides (cents)" "$tot" 4000
 rm -f "$HOME/.claude/credit-config"
-run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur < "$HOME/.claude/credit-live"
+run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$HOME/.claude/credit-live"
 assert_eq "override removed -> total lifts back to balance" "$tot" 6000
 
 echo "fetcher: steady state"
 d0=$(cut -d'|' -f9 "$HOME/.claude/credit-live")
-run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur < "$HOME/.claude/credit-live"
+run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$HOME/.claude/credit-live"
 assert_eq "unchanged balance keeps total" "$tot" 6000; assert_eq "unchanged balance keeps drop" "$drop" "$d0"
 
 echo "fetcher: failures carry numbers forward, never invent"
 CODE_CREDITS=500 run_fetch; c=$(cat "$HOME/.claude/credit-live")
 assert_has "500 -> http_500 status" "$c" "http_500|"
-IFS='|' read -r st ts bal used lim en ar tot drop cur < "$HOME/.claude/credit-live"
+IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$HOME/.claude/credit-live"
 assert_eq "500 carries balance" "$bal" 6000; assert_eq "500 carries total" "$tot" 6000
 printf 'not json' > "$FIX_CREDITS"; run_fetch; c=$(cat "$HOME/.claude/credit-live")
 assert_has "bad json -> badjson" "$c" "badjson|"
 printf '{"amount":"6000"}' > "$FIX_CREDITS"; run_fetch; c=$(cat "$HOME/.claude/credit-live")
 assert_has "string amount -> badjson (not coerced)" "$c" "badjson|"
 printf '{"amount":6000.7,"currency":"usd!!"}' > "$FIX_CREDITS"
-CODE_USAGE=403 run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur < "$HOME/.claude/credit-live"
+CODE_USAGE=403 run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$HOME/.claude/credit-live"
 assert_eq "usage 403 -> still ok" "$st" ok; assert_eq "fractional cents floored" "$bal" 6000
 assert_eq "usage 403 -> month fields empty" "$used|$lim|$en" "||"; assert_eq "currency sanitised" "$cur" usd
 printf '{"amount":6000,"currency":"USD"}' > "$FIX_CREDITS"
 printf '{"extra_usage":{"is_enabled":false,"monthly_limit":null,"used_credits":null}}' > "$FIX_USAGE"
-run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur < "$HOME/.claude/credit-live"
+run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$HOME/.claude/credit-live"
 assert_eq "null limit -> empty" "$lim" ""; assert_eq "null used -> empty" "$used" ""; assert_eq "disabled -> 0" "$en" 0
+
+echo "fetcher: the real out-of-credits response"
+printf '{"amount":0,"currency":"USD","auto_reload_settings":null,"expiry_policy_months":null}' > "$FIX_CREDITS"
+printf '{"extra_usage":{"is_enabled":false,"monthly_limit":4000,"used_credits":0.0,"utilization":0.0,"currency":"USD","decimal_places":2,"disabled_reason":"out_of_credits","user_disabled":false}}' > "$FIX_USAGE"
+run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$HOME/.claude/credit-live"
+assert_eq "real response: ok" "$st" ok; assert_eq "balance 0" "$bal" 0; assert_eq "used 0.0 floored" "$used" 0
+assert_eq "limit 4000" "$lim" 4000; assert_eq "disabled" "$en" 0; assert_eq "reason captured" "$why" out_of_credits
+assert_eq "decimals captured" "$dp" 2; assert_eq "null auto_reload -> 0" "$ar" 0
+o=$(line2 "$SUB");            assert_has "out of credits -> not in use, quota row" "$o" "Session: 16%"
+o=$(line1 "$SUB");            assert_has "out of credits -> line-1 says so" "$o" "· no credits"
+                              assert_not "out of credits -> no bare \$0.00" "$o" 'credits $0.00'
+printf 'MODE=credits\n' > "$HOME/.claude/credit-config"
+o=$(line2 "$SUB");            assert_has "forced row names the state" "$o" "Credits: out of credits"
+                              assert_has "forced row says what to do" "$o" "top up"
+rm -f "$HOME/.claude/credit-config"
+echo "fetcher: zero-decimal currency is not divided by 100"
+printf '{"amount":5000,"currency":"JPY"}' > "$FIX_CREDITS"
+printf '{"extra_usage":{"is_enabled":true,"monthly_limit":null,"used_credits":1000,"decimal_places":0}}' > "$FIX_USAGE"
+run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$HOME/.claude/credit-live"
+assert_eq "decimals 0 captured" "$dp" 0
+printf '%s|%s|5000|1000||1|0|6000|%s|JPY||0\n' ok "$NOW" "$((NOW-30))" > "$HOME/.claude/credit-live"
+o=$(line2 "$SUB");            assert_has "JPY shown whole, not /100" "$o" '$5000 left of $6000'
+printf '{"amount":6000,"currency":"USD"}' > "$FIX_CREDITS"
+printf '{"extra_usage":{"is_enabled":true,"monthly_limit":10000,"used_credits":0,"decimal_places":2}}' > "$FIX_USAGE"
 
 echo "fetcher: hostile cache lines are sanitised, not re-emitted"
 printf 'ok|1|35|$(touch %s/pwned)|1|2|xyz|4000|1|US$D\r|extra|more\n' "$T" > "$HOME/.claude/credit-live"
 CODE_CREDITS=500 run_fetch; c=$(cat "$HOME/.claude/credit-live")
-assert_eq "hostile line after 500 -> 10 clean fields" "$(printf '%s' "$c" | awk -F'|' '{print NF}')" 10
+assert_eq "hostile line after 500 -> 12 clean fields" "$(printf '%s' "$c" | awk -F'|' '{print NF}')" 12
 assert_eq "hostile used field dropped" "$(printf '%s' "$c" | cut -d'|' -f4)" ""
 assert_eq "en=2 dropped" "$(printf '%s' "$c" | cut -d'|' -f6)" ""; assert_eq "ar=xyz dropped" "$(printf '%s' "$c" | cut -d'|' -f7)" ""
 assert_eq "currency sanitised" "$(printf '%s' "$c" | cut -d'|' -f10)" "USD"
 [ ! -f "$T/pwned" ] && ok "nothing executed" || bad "cache content executed"
 printf 'ok|1|4000|0|10000|1|0|99999999999999999999|1|USD\n' > "$HOME/.claude/credit-live"
-run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur < "$HOME/.claude/credit-live"
+run_fetch; IFS='|' read -r st ts bal used lim en ar tot drop cur why dp < "$HOME/.claude/credit-live"
 assert_eq "20-digit total replaced on success" "$tot" 6000
 for bad_total in 'TOTAL=1e5' 'TOTAL=40; rm -rf ~' 'TOTAL=40.5.5' ' TOTAL=40' 'TOTAL=99999999999999999999'; do
     printf '%s\n' "$bad_total" > "$HOME/.claude/credit-config"
@@ -336,7 +382,12 @@ o=$(/bin/bash "$HOME/.claude/ccredit" mode bogus 2>&1); assert_has "mode bogus r
 o=$(/bin/bash "$HOME/.claude/ccredit" total 'abc' 2>&1); assert_has "total abc rejected" "$o" "usage"
 o=$(/bin/bash "$HOME/.claude/ccredit" show); assert_has "show prints balance" "$o" 'balance      $60.00'
 assert_has "show prints mode" "$o" "row mode     credits"
+o=$(/bin/bash "$HOME/.claude/ccredit" source manual); assert_has "source manual" "$o" "balance source: manual"
+o=$(/bin/bash "$HOME/.claude/ccredit" source bogus 2>&1); assert_has "source bogus rejected" "$o" "usage"
 o=$(/bin/bash "$HOME/.claude/ccredit" set 35.30); assert_has "legacy set still works" "$o" 'anchored at $35.30'
+o=$(/bin/bash "$HOME/.claude/ccredit" show); assert_has "show reports the source" "$o" "source       manual"
+assert_has "show reports the anchor" "$o" 'hand anchor  $35.30'
+/bin/bash "$HOME/.claude/ccredit" source live >/dev/null
 assert_eq "set keeps MODE" "$(grep -c '^MODE=credits' "$HOME/.claude/credit-config")" 1
 assert_eq "set writes BALANCE_AT" "$(grep -c '^BALANCE_AT=' "$HOME/.claude/credit-config")" 1
 
