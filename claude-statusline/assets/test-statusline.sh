@@ -338,6 +338,42 @@ e=$(env SHELLOPTS=xtrace /bin/bash "$HOME/.claude/credit-balance.sh" --print 2>&
 assert_not "inherited xtrace does not print the token" "$e" "SECRET"
 rm -rf "$HOME/.claude/credit-live.lock"
 
+echo "fetcher: --orgs asks every organization and writes nothing"
+cat > "$T/bin/curl" <<'CEOF'
+#!/bin/sh
+u=""; for a in "$@"; do case "$a" in https://*) u="$a";; esac; done
+printf '%s\n' "$u" >> "$CURL_LOG"
+case "$u" in
+  */api/oauth/organizations) printf '{"organizations":[{"uuid":"4c48ce7b-e985-4588-a015-06b81a069593","name":"personal","organization_type":"claude_ai"},{"uuid":"9a11bb22-cc33-dd44-ee55-ff6677889900","name":"console","organization_type":"api"}]}';;
+  *9a11bb22*/prepaid/credits) printf '{"amount":35,"currency":"USD"}';;
+  *prepaid/credits) printf '{"amount":0,"currency":"USD"}';;
+  *) printf '{}';;
+esac
+printf '\n200'
+CEOF
+chmod +x "$T/bin/curl"
+cp "$HOME/.claude/credit-live" "$T/live.before" 2>/dev/null || : > "$T/live.before"
+o=$(run_fetch --orgs)
+assert_has "--orgs lists the login org" "$o" "4c48ce7b-e985-4588-a015-06b81a069593"
+assert_has "--orgs lists the second org" "$o" "9a11bb22-cc33-dd44-ee55-ff6677889900"
+assert_has "--orgs reports the zero balance" "$o" '"amount":0'
+assert_has "--orgs finds the money" "$o" '"amount":35'
+assert_eq "--orgs writes no cache" "$(cat "$HOME/.claude/credit-live" 2>/dev/null)" "$(cat "$T/live.before")"
+assert_not "--orgs never prints the token" "$o" "SECRET"
+# restore the fixture-serving shim
+cat > "$T/bin/curl" <<'CEOF'
+#!/bin/sh
+url=""; for a in "$@"; do case "$a" in https://*) url="$a" ;; esac; done
+printf '%s\n' "$url" >> "$CURL_LOG"; printf '%s\n' "$*" >> "$CURL_LOG.full"
+[ -n "${CURL_DELAY:-}" ] && sleep "$CURL_DELAY"
+case "$url" in
+  */prepaid/credits) cat "$FIX_CREDITS"; printf '\n%s' "${CODE_CREDITS:-200}" ;;
+  */api/oauth/usage) cat "$FIX_USAGE";   printf '\n%s' "${CODE_USAGE:-200}" ;;
+  *) printf '{}\n404' ;;
+esac
+CEOF
+chmod +x "$T/bin/curl"
+
 echo "fetcher: auth edge cases"
 past=$(( (NOW - 60) * 1000 ))
 printf '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-SECRETSECRET","expiresAt":%s}}' "$past" > "$T/creds.json"

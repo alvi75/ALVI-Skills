@@ -24,7 +24,7 @@ and spend-limit rows are Bash-only (see Known limits).
 | `${CLAUDE_SKILL_DIR}/assets/statusline.ps1` | Windows | PowerShell 5.1, nothing else |
 | `${CLAUDE_SKILL_DIR}/assets/statusline.sh` | macOS, Linux, Git Bash | `jq` |
 | `${CLAUDE_SKILL_DIR}/assets/test-statusline.ps1` | Windows | runs the suite against either layout |
-| `${CLAUDE_SKILL_DIR}/assets/test-statusline.sh` | macOS, Linux | 169 checks: renderer rows, credit fetcher (Keychain and API shimmed), `ccredit` |
+| `${CLAUDE_SKILL_DIR}/assets/test-statusline.sh` | macOS, Linux | 175 checks: renderer rows, credit fetcher (Keychain and API shimmed), `ccredit` |
 | `${CLAUDE_SKILL_DIR}/assets/credit-balance.sh` | macOS, Linux | fetches the **live** usage-credit balance for a claude.ai login; run detached, never on the render path |
 | `${CLAUDE_SKILL_DIR}/assets/ccredit` | macOS, Linux | shows the balance, forces or hides the row, sets the bar's reference total |
 | `${CLAUDE_SKILL_DIR}/assets/credit-spend.sh` | macOS, Linux | Console API-key billing only: fetches real billed spend for the hand-anchored meter |

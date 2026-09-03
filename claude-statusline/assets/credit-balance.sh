@@ -176,6 +176,17 @@ isint "$EXP" || EXP=0
 ORG=$(jq -r '.oauthAccount.organizationUuid // empty' "$HOME/.claude.json" 2>/dev/null)
 case "$ORG" in *[!0-9a-fA-F-]*|'') fail noauth ;; esac
 
+get() {   # $1 path -> sets BODY and CODE
+    _r=$(curl -sS --max-time 8 -w $'\n%{http_code}' "https://api.anthropic.com$1" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'anthropic-beta: oauth-2025-04-20' \
+            -H 'Content-Type: application/json' \
+            -H 'User-Agent: cc-statusline-credit/2.0' 2>/dev/null)
+    CODE=${_r##*$'\n'}
+    BODY=${_r%$'\n'*}
+    case "$CODE" in ''|*[!0-9]*) CODE=000 ;; esac
+}
+
 # --orgs: which organization holds the money. An account can carry more than one
 # balance - the claude.ai usage-credit pool and a Console prepaid pool are
 # different orgs with different amounts - so this asks every org the login can
@@ -199,17 +210,6 @@ if [ "${1:-}" = "--orgs" ]; then
     done
     exit 0
 fi
-
-get() {   # $1 path -> sets BODY and CODE
-    _r=$(curl -sS --max-time 8 -w $'\n%{http_code}' "https://api.anthropic.com$1" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H 'anthropic-beta: oauth-2025-04-20' \
-            -H 'Content-Type: application/json' \
-            -H 'User-Agent: cc-statusline-credit/2.0' 2>/dev/null)
-    CODE=${_r##*$'\n'}
-    BODY=${_r%$'\n'*}
-    case "$CODE" in ''|*[!0-9]*) CODE=000 ;; esac
-}
 
 get "/api/oauth/organizations/$ORG/prepaid/credits"; CODE1=$CODE; RAW_CREDITS=$BODY
 [ "$CODE1" = 200 ] || fail "http_$CODE1"
