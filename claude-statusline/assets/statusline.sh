@@ -17,6 +17,11 @@
 #
 # No dollar figure by design: cost.total_cost_usd is a client-side estimate of
 # what the API would have charged. On a subscription nobody pays it.
+#
+# The one dollar figure that IS real: usage credits on a claude.ai login. When
+# they are being drawn on, line 2 becomes a live balance meter instead:
+#   Credits: $0.35 left of $40.00  ▕████████████▏  $39.65 used · month $39.65
+# (fetched by credit-balance.sh, never on the render path - see that file).
 
 LAYOUT=meters
 while [ $# -gt 0 ]; do
@@ -45,7 +50,7 @@ command -v jq >/dev/null 2>&1 || { printf '%s\n' "status line needs jq - see ~/.
 # shifts all later fields left - an absent .effort.level would land the session
 # id in the effort slot. A non-whitespace IFS preserves empty fields exactly.
 SEP=$'\037'
-IFS="$SEP" read -r MODEL DIR CTXPCT USED SIZE MS COST EFFORT FAST P5 R5 P7 R7 PS RS SID <<EOF
+IFS="$SEP" read -r MODEL DIR CTXPCT USED SIZE MS COST EFFORT FAST P5 R5 P7 R7 PS RS SID XUE XUU XUL <<EOF
 $(printf '%s' "$input" | jq -j '[
   (.model.display_name // "claude"),
   (.workspace.current_dir // .cwd // ""),
@@ -62,7 +67,10 @@ $(printf '%s' "$input" | jq -j '[
   (.rate_limits.seven_day.resets_at // ""),
   (.rate_limits.spend_limit.used_percentage // ""),
   (.rate_limits.spend_limit.resets_at // ""),
-  (.session_id // "nosession")
+  (.session_id // "nosession"),
+  (if .rate_limits.extra_usage.is_enabled == true then 1 elif .rate_limits.extra_usage.is_enabled == false then 0 else "" end),
+  (.rate_limits.extra_usage.used_credits // ""),
+  (.rate_limits.extra_usage.monthly_limit // "")
 ] | map(tostring) | join("\u001f")' 2>/dev/null)
 EOF
 [ -z "$MODEL" ] && { printf '%s\n' "$FALLBACK"; exit 0; }
@@ -128,6 +136,77 @@ meter() {
     printf '%s%s%s%s%s%s%s%s%s' "$TRACK" $'\342\226\225' "$R" "$col$body$head" "$TRACK" "$pad" "$R" "$TRACK" $'\342\226\217'"$R"
 }
 
+# ---- live usage-credit balance (claude.ai login) ----
+# credit-balance.sh keeps ~/.claude/credit-live fresh. This reads ONLY what it
+# already cached and spawns it detached when that is older than 60 s, so the
+# render path never waits on the network. Fields are documented in that file.
+LIVE_F="$HOME/.claude/credit-live"
+CRMODE=auto; CRWIN=600; LEGACY=0
+if [ -f "$HOME/.claude/credit-config" ]; then
+    # One awk, not sed+sed+grep: this runs on every render. Quotes and CR are
+    # tolerated. BALANCE_AT marks the hand-anchored (API-key) meter; MODE/TOTAL
+    # alone do not.
+    IFS='|' read -r _m _w LEGACY <<EOF
+$(awk -F= '{ sub(/\r$/,""); v=$2; gsub(/^["[:space:]]+|["[:space:]]+$/,"",v) }
+    $1=="MODE" && v ~ /^(auto|credits|quota)$/ { m=v }
+    $1=="ACTIVE_WINDOW" && v ~ /^[0-9]{1,9}$/ { w=v }
+    $1=="BALANCE_AT" { l=1 }
+    END { printf "%s|%s|%d", m, w, l }' "$HOME/.claude/credit-config" 2>/dev/null)
+EOF
+    [ -n "$_m" ] && CRMODE="$_m"
+    [ -n "$_w" ] && CRWIN="$_w"
+    case "$LEGACY" in 1) ;; *) LEGACY=0 ;; esac
+fi
+LIVE_OK=0; LIVE_STALE=1; LIVE_AGE=999999
+LST=""; LBAL=""; LUSED=""; LLIM=""; LEN=""; LAR=""; LTOT=""; LDROP=""; LCUR=""
+if [ -f "$LIVE_F" ]; then
+    IFS='|' read -r LST lts LBAL LUSED LLIM LEN LAR LTOT LDROP LCUR < "$LIVE_F" 2>/dev/null
+    LIVE_AGE=$(( $(date +%s) - $(int "${lts:-0}") ))
+    [ "$LIVE_AGE" -lt 0 ] && LIVE_AGE=0
+    # Integers in cents (at most 15 digits - bash arithmetic wraps past 2^63)
+    # or nothing. A malformed field must not become "$0 left".
+    case "$LBAL"  in ''|*[!0-9]*|????????????????*) LBAL=""  ;; esac
+    case "$LUSED" in ''|*[!0-9]*|????????????????*) LUSED="" ;; esac
+    case "$LLIM"  in ''|*[!0-9]*|????????????????*) LLIM=""  ;; esac
+    case "$LTOT"  in ''|*[!0-9]*|????????????????*) LTOT=""  ;; esac
+    case "$LDROP" in ''|*[!0-9]*|????????????????*) LDROP="" ;; esac
+    case "$LEN"   in 0|1) ;; *) LEN="" ;; esac
+    [ -n "$LBAL" ] && LIVE_OK=1
+    # Bare (unmarked) only while the last SUCCESSFUL fetch is under 5 minutes old.
+    [ "$LST" = ok ] && [ "$LIVE_AGE" -lt 300 ] && LIVE_STALE=0
+fi
+# The payload may carry extra_usage itself (undocumented, v2.1.259 schema);
+# use it only to fill gaps the fetcher left.
+[ -z "$LEN" ]   && case "$XUE" in 0|1) LEN="$XUE" ;; esac
+[ -z "$LUSED" ] && case "$XUU" in ''|*[!0-9.]*) ;; *) LUSED=$(int "$XUU") ;; esac
+[ -z "$LLIM" ]  && case "$XUL" in ''|*[!0-9.]*) ;; *) LLIM=$(int "$XUL") ;; esac
+# Refresh cadence: 60 s normally, 10 min after an auth-shaped failure so a
+# logged-out machine is not polled every render.
+_need=60; case "$LST" in noauth|expired|nocurl|nojq) _need=600 ;; esac
+if [ "$LAYOUT" = meters ] && [ "$CRMODE" != quota ] && [ "$LIVE_AGE" -ge "$_need" ] && [ -x "$HOME/.claude/credit-balance.sh" ]; then
+    ( "$HOME/.claude/credit-balance.sh" >/dev/null 2>&1 & ) 2>/dev/null
+fi
+# "Credits in use" = the balance was seen falling within ACTIVE_WINDOW, or a
+# plan window is exhausted (that is exactly when extra usage takes over).
+# Disabled extra usage (LEN=0) can never be in use, whatever the balance does.
+has5=0; has7=0; hasS=0
+case "$P5" in ''|*[!0-9.]*) ;; *) has5=1 ;; esac
+case "$P7" in ''|*[!0-9.]*) ;; *) has7=1 ;; esac
+case "$PS" in ''|*[!0-9.]*) ;; *) hasS=1 ;; esac
+CR_ACTIVE=0
+if [ "$CRMODE" = credits ]; then CR_ACTIVE=1
+elif [ "$CRMODE" = auto ] && [ "$LIVE_OK" = 1 ] && [ "$LEN" != 0 ]; then
+    # A drop stamp in the future (clock skew, a cache copied from another
+    # machine) is not evidence of anything: age must be 0..window.
+    if [ -n "$LDROP" ]; then
+        _da=$(( $(date +%s) - LDROP ))
+        [ "$_da" -ge 0 ] && [ "$_da" -lt "$CRWIN" ] && CR_ACTIVE=1
+    fi
+    [ "$has5" = 1 ] && [ "$(int "$P5")" -ge 100 ] && CR_ACTIVE=1
+    [ "$has7" = 1 ] && [ "$(int "$P7")" -ge 100 ] && CR_ACTIVE=1
+fi
+cents() { awk -v c="$1" 'BEGIN{ printf "%.2f", c/100 }'; }
+
 # ---- line 1 ----
 MODEL_SHORT=$(printf '%s' "$MODEL" | sed 's/[[:space:]]*(.*)[[:space:]]*$//')
 EFF=""; EFF_P=""
@@ -175,12 +254,23 @@ else CTXTOK="$(fmt_tok "$(int "$USED")") tok"; fi
 TAIL=""
 if [ "$LAYOUT" = meters ]; then
     tail_txt="ctx ${CTXI}% ${DOT} ${CTXTOK}"
+    # A known balance that is NOT being drawn on right now still gets a glance
+    # on line 1, so a top-up landing (or running dry) is visible without the
+    # meter taking over line 2. Dropped first when the width runs out.
+    hint=""
+    if [ "$LIVE_OK" = 1 ] && [ "$CR_ACTIVE" = 0 ]; then
+        hint=" ${DOT} credits \$$(cents "$LBAL")"
+        [ "$LIVE_STALE" = 1 ] && hint=" ${DOT} credits ~\$$(cents "$LBAL")"
+    fi
     plain1=$'\342\227\206'" ${MODEL_SHORT}${EFF_P}${FLAG_P}  ${BASE}${GIT_P}"
     # printable length in characters, not bytes
-    plen=$(printf '%s' "$plain1$tail_txt" | awk '{ print length($0) }')
+    plen=$(printf '%s' "$plain1$tail_txt$hint" | awk '{ print length($0) }')
+    if [ -n "$hint" ] && [ $(( plen + 2 + RIGHT_PAD )) -gt "$COLS" ]; then
+        hint=""; plen=$(printf '%s' "$plain1$tail_txt" | awk '{ print length($0) }')
+    fi
     if [ $(( plen + 2 + RIGHT_PAD )) -le "$COLS" ]; then
         if [ "$CTXI" -ge 90 ]; then tcol="$RED"; elif [ "$CTXI" -ge 70 ]; then tcol="$AMBER"; else tcol="$LBL"; fi
-        TAIL="  ${tcol}${tail_txt}${R}"
+        TAIL="  ${tcol}${tail_txt}${hint}${R}"
     fi
 fi
 # %s not %b: the colour constants already hold literal ESC bytes, and %b would
@@ -188,12 +278,47 @@ fi
 printf '%s\n' "${CYAN}"$'\342\227\206'" ${WHITE}${MODEL_SHORT}${R}${EFF}${FLAG}  ${LBL}${BASE}${R}${GIT}${TAIL}"
 
 # ---- line 2 ----
-has5=0; has7=0; hasS=0
-case "$P5" in ''|*[!0-9.]*) ;; *) has5=1 ;; esac
-case "$P7" in ''|*[!0-9.]*) ;; *) has7=1 ;; esac
-case "$PS" in ''|*[!0-9.]*) ;; *) hasS=1 ;; esac
-
-if [ "$LAYOUT" = meters ] && { [ "$has5" = 1 ] || [ "$has7" = 1 ]; }; then
+if [ "$LAYOUT" = meters ] && [ "$CR_ACTIVE" = 1 ]; then
+    # Live usage-credit meter. Bar = share of the last top-up already burned, so
+    # a recharge visibly empties it. '~' marks a figure older than 5 minutes or
+    # carried over from a failed refresh; the numbers are never invented.
+    if [ "$LIVE_OK" = 0 ]; then
+        why="${LST:-fetching}"
+        [ -x "$HOME/.claude/credit-balance.sh" ] || why="no fetcher at ~/.claude/credit-balance.sh"
+        printf '%s\n' "${RED}Credits: unavailable ${DOT} ${why}${R}"
+    else
+        MARK=""; [ "$LIVE_STALE" = 1 ] && MARK="~"
+        TOTC="$LTOT"; { [ -z "$TOTC" ] || [ "$TOTC" -lt "$LBAL" ]; } && TOTC="$LBAL"
+        SPENTC=$(( TOTC - LBAL ))
+        if [ "$TOTC" -gt 0 ]; then
+            UPCT=$(awk -v s="$SPENTC" -v t="$TOTC" 'BEGIN{ v=s*100/t; if(v<0)v=0; if(v>100)v=100; printf "%.4f", v }')
+        else UPCT=100; fi
+        UPI=$(clamp "$UPCT")
+        if [ "$UPI" -ge 90 ]; then ACOL="$RED"; elif [ "$UPI" -ge 75 ]; then ACOL="$AMBER"; else ACOL="$LBL"; fi
+        BALD=$(cents "$LBAL"); TOTD=$(cents "$TOTC"); SPD=$(cents "$SPENTC")
+        mon=""
+        if [ -n "$LUSED" ]; then
+            mon="month \$$(cents "$LUSED")"
+            [ -n "$LLIM" ] && [ "$LLIM" -gt 0 ] && mon="$mon/\$$(cents "$LLIM")"
+        fi
+        arx=""; [ "$LAR" = 1 ] && arx=" ${DOT} reload on"
+        c0l="Credits: ${MARK}\$${BALD} left of \$${TOTD}"; c0r="\$${SPD} used${mon:+ ${DOT} $mon}${arx}"
+        c1l="Credits ${MARK}\$${BALD}/\$${TOTD}";         c1r="${mon:-\$${SPD} used}"
+        c2l="${MARK}\$${BALD}";                            c2r="${UPI}%"
+        chrome=$(( 2 + 2 + RIGHT_PAD ))
+        CL="$c2l"; CR="$c2r"; W=$METER_W
+        for i in 0 1 2; do
+            case $i in 0) a="$c0l"; b="$c0r" ;; 1) a="$c1l"; b="$c1r" ;; 2) a="$c2l"; b="$c2r" ;; esac
+            t=$(printf '%s%s' "$a" "$b" | awk '{print length($0)}')
+            if [ $(( t + METER_W + chrome )) -le "$COLS" ]; then CL="$a"; CR="$b"; W=$METER_W; break; fi
+            if [ $i = 2 ]; then
+                W=$(( COLS - t - chrome )); [ "$W" -lt 1 ] && W=1
+                [ "$W" -gt "$METER_W" ] && W=$METER_W
+            fi
+        done
+        printf '%s\n' "${ACOL}${CL}${R}  $(meter "$UPCT" "$W")  ${LBL}${CR}${R}"
+    fi
+elif [ "$LAYOUT" = meters ] && { [ "$has5" = 1 ] || [ "$has7" = 1 ]; }; then
     p5=$(clamp "$P5"); p7=$(clamp "$P7")
     p5f=$(clampf "$P5"); p7f=$(clampf "$P7")
     r5=$(fmt_reset "$(int "$R5")"); r7=$(fmt_reset "$(int "$R7")")
@@ -253,10 +378,11 @@ elif [ "$LAYOUT" = meters ] && [ "$hasS" = 1 ]; then
         [ "$W" -gt "$METER_W" ] && W=$METER_W
     done
     printf '%s\n' "${scol}${SEL}${R}  $(meter "$psf" "$W")"
-elif [ "$LAYOUT" = meters ] && [ -f "$HOME/.claude/credit-config" ]; then
-    # Credit (API-billing) auth: rate_limits is absent, so meter dollars instead.
-    # No API returns a credit balance, so BALANCE is hand-entered and we subtract
-    # spend measured since it was set.
+elif [ "$LAYOUT" = meters ] && [ "$LEGACY" = 1 ]; then
+    # Console (API-key) billing: rate_limits is absent and there is no claude.ai
+    # login to ask for a balance, so BALANCE is hand-entered (ccredit set) and
+    # spend measured since then is subtracted. Kept for that auth mode only; a
+    # claude.ai login gets the live row above instead.
     BALANCE=0; BALANCE_AT=""; CAL=1.0
     . "$HOME/.claude/credit-config" 2>/dev/null
 

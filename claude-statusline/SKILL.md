@@ -1,6 +1,6 @@
 ---
 name: claude-statusline
-description: "Build, install, customize, or debug a Claude Code status line — the bar under the prompt showing model, context %, rate-limit meters, or git state. Use when asked to make the terminal look better or show usage, add a context or progress bar, change the status line colours or layout, mirror the claude.ai composer footer, or fix a status line that is blank, stale, garbled, or slow. Ships a PowerShell and a Bash renderer with a mutation-tested suite, plus a credit meter for API-credit billing. Invoke with /claude-statusline."
+description: "Build, install, customize, or debug a Claude Code status line — the bar under the prompt showing model, context %, rate-limit meters, or git state. Use when asked to make the terminal look better or show usage, add a context or progress bar, change the status line colours or layout, mirror the claude.ai composer footer, or fix a status line that is blank, stale, garbled, or slow. Ships a PowerShell and a Bash renderer with a mutation-tested suite, plus a live usage-credit balance meter (dollars left, spent, monthly limit) for claude.ai logins that buy extra usage. Invoke with /claude-statusline."
 ---
 
 # Claude Code status line
@@ -16,7 +16,7 @@ layout, a Windows machine, or a bar that is misbehaving.
 
 ## What ships here
 
-Two renderers plus two helpers for the credit meter. The Bash renderer is ahead: the credit
+Two renderers plus three helpers for the credit meter. The Bash renderer is ahead: the credit
 and spend-limit rows are Bash-only (see Known limits).
 
 | File | Platform | Needs |
@@ -24,8 +24,10 @@ and spend-limit rows are Bash-only (see Known limits).
 | `${CLAUDE_SKILL_DIR}/assets/statusline.ps1` | Windows | PowerShell 5.1, nothing else |
 | `${CLAUDE_SKILL_DIR}/assets/statusline.sh` | macOS, Linux, Git Bash | `jq` |
 | `${CLAUDE_SKILL_DIR}/assets/test-statusline.ps1` | Windows | runs the suite against either layout |
-| `${CLAUDE_SKILL_DIR}/assets/ccredit` | macOS, Linux | sets the credit balance the meter fills against |
-| `${CLAUDE_SKILL_DIR}/assets/credit-spend.sh` | macOS, Linux | fetches real billed spend; run detached, never on the render path |
+| `${CLAUDE_SKILL_DIR}/assets/test-statusline.sh` | macOS, Linux | 142 checks: renderer rows, credit fetcher (Keychain and API shimmed), `ccredit` |
+| `${CLAUDE_SKILL_DIR}/assets/credit-balance.sh` | macOS, Linux | fetches the **live** usage-credit balance for a claude.ai login; run detached, never on the render path |
+| `${CLAUDE_SKILL_DIR}/assets/ccredit` | macOS, Linux | shows the balance, forces or hides the row, sets the bar's reference total |
+| `${CLAUDE_SKILL_DIR}/assets/credit-spend.sh` | macOS, Linux | Console API-key billing only: fetches real billed spend for the hand-anchored meter |
 
 ```
 -Layout meters   (default)   --layout meters
@@ -36,7 +38,15 @@ Session: 16% · resets in 1h 31m  ▕██░░░░░░░░░░▏  �
 ◆ Opus 5  High  my-project  ⎇ main
 Context: 13% · 128k/1M · 62m34s · 5h 16%  ▕██░░░░░░░░░░▏
 
--Layout meters, on credit (API-billing) auth — same layout, dollars instead of quota
+-Layout meters, claude.ai login, while usage credits are being drawn on — live balance
+◆ Opus 5  High  my-project  ⎇ main  ctx 13% · 128k/1M
+Credits: $0.35 left of $40.00  ▕████████████▏  $39.65 used · month $39.65/$100.00
+
+-Layout meters, claude.ai login, credits known but the plan quota is carrying the load
+◆ Opus 5  High  my-project  ⎇ main  ctx 13% · 128k/1M · credits $0.35
+Session: 16% · resets in 1h 31m  ▕██░░░░░░░░░░▏  ▕█░░░░░░░░░░░▏  Weekly: 8% · resets in 4d 22h
+
+-Layout meters, Console API-key billing — no login to ask, so the balance is hand-anchored
 ◆ Opus 5  High  my-project  ⎇ main  ctx 13% · 128k/1M
 Credits: ~$35.41 left  ▕█░░░░░░░░░░░▏  $3.10 this session
 
@@ -53,49 +63,97 @@ The second row picks the first of these that applies, so it is never blank:
 
 | # | Condition | Row |
 | --- | --- | --- |
-| 1 | `rate_limits.five_hour` or `.seven_day` present | the two quota meters |
-| 2 | only `rate_limits.spend_limit` present (gateway) | one spend-limit meter |
-| 3 | no `rate_limits`, but `~/.claude/credit-config` exists | the credit meter |
-| 4 | otherwise | the context meter |
+| 1 | usage credits are **in use**: `~/.claude/credit-live` holds a balance, extra usage is not disabled, and either the balance fell within the last 10 min or a plan window is at 100%; or `ccredit mode credits` | the live credit meter |
+| 2 | `rate_limits.five_hour` or `.seven_day` present | the two quota meters |
+| 3 | only `rate_limits.spend_limit` present (gateway) | one spend-limit meter |
+| 4 | no `rate_limits`, and `~/.claude/credit-config` carries a hand anchor (`BALANCE_AT`) | the hand-anchored credit meter (API-key billing) |
+| 5 | otherwise | the context meter |
 
-Row 2 is not cosmetic. Each `rate_limits` window is independently absent, so a gateway payload can
+Row 1 exists because the plan meters say nothing once a window is exhausted and extra usage takes
+over — that is exactly when the money starts moving. When credits are known but idle, line 1 shows
+the balance as a tail (`· credits $0.35`) so a top-up landing, or the balance running dry, is
+still visible.
+
+Row 3 is not cosmetic. Each `rate_limits` window is independently absent, so a gateway payload can
 carry `spend_limit` and neither of the other two — without its own branch that payload fell
 through to dollars-by-hand while a real first-party spend figure sat unread in the same JSON.
 
-**Dollars only on credit auth.** `cost.total_cost_usd` is a client-side estimate of what the API
-would have charged; on a subscription nobody pays it, so the subscription row never shows it and a
-test asserts that. On Console (API-billing) auth it is what you actually owe, so the credit row
-shows it.
+**Dollars only where they are real.** `cost.total_cost_usd` is a client-side estimate of what the
+API would have charged; on a subscription nobody pays it, so the subscription row never shows it
+and a test asserts that. The live credit row shows the server's balance, not an estimate. The
+hand-anchored row (API-key billing) shows the estimate because that is all there is.
 
 ## The credit meter
 
-On credit auth there is no quota to meter, so the row meters money instead. **No Anthropic API
-returns a credit balance** — not the Admin API, not the Usage & Cost API (verified against both
-references). Only spend is queryable. So the balance is anchored by hand and spend is subtracted
-from it:
+### claude.ai login with usage credits (the normal case)
+
+Claude Code's own `/usage` and `/usage-credits` screens get the balance from two endpoints that
+are not documented anywhere but are readable in the CLI binary (v2.1.259):
+
+| Endpoint | Gives | Unit |
+| --- | --- | --- |
+| `GET /api/oauth/organizations/<org>/prepaid/credits` | `amount` (the balance), `auto_reload_settings.enabled` | cents |
+| `GET /api/oauth/usage` | `extra_usage.used_credits`, `.monthly_limit` (null = unlimited), `.is_enabled` | cents |
+
+`credit-balance.sh` calls both with the OAuth token Claude Code already holds for you (macOS
+Keychain item `Claude Code-credentials`, else `~/.claude/.credentials.json`) and the org id from
+`~/.claude.json`. The token stays in a shell variable, goes only to `api.anthropic.com`, and is
+never written or printed — `--print` output and the cache are asserted token-free by the suite.
+
+The cache is one line at `~/.claude/credit-live` (mode 600):
 
 ```
-left now  =  the balance you typed  −  spend since you typed it
+status|epoch|balance_c|used_c|limit_c|enabled|autoreload|total_c|drop_epoch|currency
 ```
+
+The renderer reads only that file and spawns the fetcher **detached** when it is older than 60 s
+(10 min after an auth-shaped failure, so a logged-out machine is not polled every render). The
+render path never waits on the network. One fetch at a time per machine via a `mkdir` lock.
+
+Two derived values the server does not give:
+
+- **`total_c`** — what the bar fills against: the balance seen right after the most recent
+  top-up. The fetcher bumps it whenever the balance *rises*; `ccredit total 40` pins it by hand,
+  `ccredit total auto` releases it. A recharge therefore visibly empties the bar.
+- **`drop_epoch`** — the last time the balance was seen to *fall*. That is the "credits in use"
+  signal that puts the row on line 2 for the next 10 min (`ccredit window <seconds>` changes it).
 
 ```bash
-ccredit set 35.06     # re-anchor to whatever Console shows (resets spend tracking)
-ccredit topup 20      # add a top-up to the current balance
-ccredit show          # print the anchor
+ccredit                 # balance, meter total, this month, auto-reload, freshness, row mode
+ccredit refresh         # fetch now and print the raw server answers — run this once after install
+ccredit total 40        # meter against $40  |  ccredit total auto
+ccredit mode credits    # always show the row  |  quota: never (and stop fetching)  |  auto (default)
 ```
+
+`~` on the figure means the last successful fetch is over 5 minutes old, or the numbers were
+carried over from a failed refresh. The numbers themselves are never estimated or invented: a
+failed fetch keeps the previous good balance and marks it, it does not print `$0.00`.
 
 `ccredit` lives at `~/.claude/ccredit`; symlink it onto `PATH` (`ln -sf ~/.claude/ccredit
 ~/.local/bin/ccredit`) or call it by full path — the bare commands above assume the symlink.
 
-Only the balance is manual; the subtraction is continuous. Re-anchor after each top-up — and note
-that both derived stores (`credit-ledger.d/` and the cached billed total) measure spend *since* the
-anchor, so `ccredit` deletes both on every write. Leaving them would re-subtract spend the new
-balance already accounts for.
+### Console API-key billing (no claude.ai login)
 
-To be exact: no *API* endpoint returns a balance. Claude Code itself has a local path - `/usage`
-(alias `/cost`) shows a usage-credits row, and `/usage-credits` opens claude.ai Settings > Usage
-where the balance, month-to-date spend and monthly spend limit live. Neither is machine-readable
-from a status line script, which is why the balance is still anchored by hand.
+There is no login to ask, and no *public* API returns a balance — not the Admin API, not the Usage
+& Cost API (verified against both references). So the balance is anchored by hand and measured
+spend is subtracted from it:
+
+```
+left now  =  the balance you typed  −  (spend since you typed it × calibration)
+```
+
+```bash
+ccredit set 35.06     # re-anchor to whatever Console shows; also re-learns the calibration
+ccredit topup 20      # add a top-up to the anchor
+ccredit cal 1.37      # set the calibration by hand
+```
+
+Only the balance is manual; the subtraction is continuous. Both derived stores
+(`credit-ledger.d/` and the cached billed total) measure spend *since* the anchor, so `ccredit`
+deletes both on every re-anchor. Leaving them would re-subtract spend the new balance already
+accounts for. The calibration exists because the transcript cannot see every billed call (the
+auto-mode classifier fires on each tool use, WebFetch summarizes with its own model call); one full
+session measured $34.14 billed against $24.93 visible.
 
 ### Known limits
 
@@ -107,8 +165,19 @@ from a status line script, which is why the balance is still anchored by hand.
 - `statusline.ps1` has **no credit or spend-limit row** - those are Bash-only. The PowerShell
   renderer still covers the quota and context rows, and its suite asserts no dollar figure appears,
   which remains correct for it.
+- The live balance is polled, not pushed: a drop shows up within one fetch interval (60 s), and the
+  row stays up for the active window after the last drop it saw. Between the two, the plan meters
+  show instead.
+- "In use" is inferred from the balance falling. If a model bills to credits while no plan window
+  is at 100% and the balance happens not to change between two polls (nothing was sent), the row
+  steps back to the quota meters until the next drop. `ccredit mode credits` pins it.
+- The two endpoints are undocumented. If a CLI release changes them the fetcher records
+  `http_<code>` or `badjson`, keeps the last good numbers marked `~`, and `ccredit refresh` shows
+  the raw answer to re-read.
+- Reading the Keychain item from a script prompts for access the first time on some macOS setups.
+  If that dialog is denied the status is `noauth` and the row never appears.
 
-Two spend sources, in precedence order:
+The hand-anchored row has two spend sources, in precedence order:
 
 | Source | Marker | Needs | Notes |
 | --- | --- | --- | --- |
@@ -188,6 +257,7 @@ memory — fields get added.
 | `cost.total_cost_usd` | Client-side estimate, not a bill. Resets on `/clear` |
 | `rate_limits.five_hour`, `.seven_day` | `used_percentage` and `resets_at` (Unix epoch **seconds**). Only for Claude.ai Pro/Max, only after the first API response |
 | `rate_limits.spend_limit` | Same two fields, but only behind a Claude apps gateway that sets a spend limit, and `used_percentage` **can exceed 100** once you pass the limit. Needs Claude Code v2.1.251+. Each window is independently absent, so a payload can carry `spend_limit` and neither of the other two |
+| `rate_limits.extra_usage` | **Undocumented.** The v2.1.259 payload schema declares `is_enabled`, `monthly_limit`, `used_credits` (cents), `utilization`, `currency` as optional. No balance. The renderer reads it only to fill month figures the fetcher did not get |
 | `session_id` | Stable per session — the right cache key. `$$` / `os.getpid()` change every run and defeat caching |
 | `effort.level`, `fast_mode`, `thinking.enabled` | Absent when not applicable |
 | `COLUMNS` env var | Terminal width. `tput cols` cannot see it; Claude Code exports this instead (v2.1.153+) |
