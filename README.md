@@ -2,15 +2,13 @@
 
 *A Claude Code skill toolchain — collected by Alvi to make the work easier.*
 
-Each skill here earned its place by being used, broken, and fixed. Nothing needs an account and
-nothing runs until you ask for it. One thing talks to a network: the status line's credit meter
-asks `api.anthropic.com` for your usage-credit balance, with the login Claude Code already holds,
-and only once you have wired the bar up.
+Each skill here earned its place by being used, broken, and fixed. Nothing talks to a network,
+nothing needs an account, and nothing runs until you ask for it.
 
 | Skill | What it does | Invoke |
 | --- | --- | --- |
 | `llm-council` | Sends independent agents to refute a claim before you report it, or scores competing options blind. | `/llm-council` |
-| `claude-statusline` | The bar under the prompt: rate-limit meters, context %, git state, live usage-credit balance. | `/claude-statusline` |
+| `claude-statusline` | The bar under the prompt: rate-limit meters, context %, git state. | `/claude-statusline` |
 
 ## llm-council
 
@@ -63,23 +61,9 @@ the meter only shrinks when even the shortest labels will not fit.
 The meters layout needs `rate_limits`, which is present only for Claude.ai Pro/Max auth and only
 after the first API response — it falls back to the context meter rather than printing a blank row.
 
-**Dollars only where they are real.** `cost.total_cost_usd` is a client-side estimate of what the
-API would have charged; on a subscription nobody pays it, and a test asserts it never appears on
-the plan row. What does appear is the **live usage-credit balance** when you are drawing on extra
-usage:
-
-```
-◆ Opus 5  High  my-project  ⎇ main  ctx 13% · 128k/1M
-Credits: $0.35 left of $40.00  ▕████████████▏  $39.65 used · month $39.65/$100.00
-```
-
-The balance comes from the same undocumented endpoints Claude Code's `/usage-credits` uses, fetched
-detached every 60 s with the login Claude Code already holds. **Console prepaid credits are a
-different pool** with a different balance, which no endpoint exposes; `ccredit source manual` tracks
-that one by hand and puts it in front of the plan meters. The row takes over line 2 while the
-balance is falling or a plan window is exhausted, and steps back to the plan meters otherwise, with
-the balance kept as a tail on line 1. A top-up shows up on the next poll. `ccredit` shows, forces or
-hides it. Details in `claude-statusline/SKILL.md`.
+**No dollar figure.** `cost.total_cost_usd` is a client-side estimate of what the API would have
+charged; on a subscription nobody pays it. A test asserts it never appears. Add it back if you are
+on API billing.
 
 ## Install
 
@@ -107,7 +91,7 @@ Skills are picked up without restarting Claude Code.
 | --- | --- |
 | `llm-council` | Nothing. One markdown file. |
 | `claude-statusline` on Windows | PowerShell 5.1 |
-| `claude-statusline` on macOS / Linux / Git Bash | `jq`; the credit meter also needs `curl` and a claude.ai login |
+| `claude-statusline` on macOS / Linux / Git Bash | `jq` |
 | Terminal-width fitting | Claude Code 2.1.153+. Below that the bar uses a fixed 100-column layout. |
 
 The status line stays blank in any directory whose workspace-trust dialog has not been accepted —

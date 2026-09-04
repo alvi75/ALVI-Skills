@@ -2,10 +2,8 @@
 
 **A Claude Code skill toolchain — collected by Alvi to make the work easier.**
 
-Each skill here earned its place by being used, broken, and fixed. Nothing needs an account and
-nothing runs until you ask for it. One thing talks to a network: the status line's credit meter
-asks `api.anthropic.com` for your usage-credit balance, with the login Claude Code already holds,
-and only once you have wired the bar up.
+Each skill here earned its place by being used, broken, and fixed. Nothing talks to a network,
+nothing needs an account, and nothing runs until you ask for it.
 
 | Skill | What it does |
 | --- | --- |
@@ -106,16 +104,10 @@ selects the layout:
 Then:
 
 1. Copy the script for the platform from `claude-statusline/assets/` to `<claude-home>/`:
-   `statusline.ps1` on Windows, `statusline.sh` on macOS/Linux. On macOS/Linux also copy
-   `credit-balance.sh` and `ccredit` (the live usage-credit meter) — ask first: they read the
-   claude.ai login token Claude Code keeps in the Keychain and call `api.anthropic.com` for the
-   balance every 60 s while the bar is showing. Skip both if the user does not buy extra usage
-   or does not want that. `credit-spend.sh` is only for Console API-key billing; skip it unless
-   asked.
-2. On macOS/Linux `chmod +x` them. The bar needs `jq`; if `jq` is missing, say so and offer the
-   install command for that platform (`brew install jq`, `apt install jq`) rather than installing
-   it yourself. Without `jq` the bar shows a one-line hint instead of going blank. The credit
-   meter also needs `curl`.
+   `statusline.ps1` on Windows, `statusline.sh` on macOS/Linux.
+2. On macOS/Linux `chmod +x` it. It needs `jq`; if `jq` is missing, say so and offer the install
+   command for that platform (`brew install jq`, `apt install jq`) rather than installing it
+   yourself. Without `jq` the bar shows a one-line hint instead of going blank.
 3. **Back up `<claude-home>/settings.json` first** (`settings.json.bak`), then add the
    `statusLine` block. Edit it **as text**, inserting one key — do not round-trip it through
    `ConvertFrom-Json | ConvertTo-Json`: PowerShell 5.1 defaults to depth 2 and will flatten a
@@ -150,17 +142,15 @@ For the context layout, append `-Layout context` / `--layout context` to the com
 `refreshInterval: 60` is what keeps the reset countdowns moving in every open session, including
 windows the user is not typing in. Do not drop it.
 
-4. Run the test sweep before declaring it done:
+4. Run the test sweep before declaring it done — Windows only:
 
    ```
    powershell -NoProfile -File <claude-home>/skills/claude-statusline/assets/test-statusline.ps1 -Script <claude-home>/statusline.ps1
-   bash <claude-home>/skills/claude-statusline/assets/test-statusline.sh
    ```
 
-   Add `-Layout context` on Windows if that layout was chosen. Exit code 0 means every check
-   passed. The Bash suite fakes the Keychain and the API, so it touches neither. If the credit
-   meter was installed, have the user run `~/.claude/ccredit refresh` themselves once — it prints
-   the balance the server returned, and it is the only step that needs their real login.
+   Add `-Layout context` if that layout was chosen. Exit code 0 means every check passed. On
+   macOS/Linux there is no suite — pipe the mock payload from `claude-statusline/SKILL.md` in by
+   hand and confirm exit 0 with non-empty output.
 
 5. Tell the user the bar appears on their **next message**, and that it stays blank in any
    directory whose workspace-trust dialog has not been accepted — `statusLine` runs a shell
