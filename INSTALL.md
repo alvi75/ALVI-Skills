@@ -9,6 +9,7 @@ nothing needs an account, and nothing runs until you ask for it.
 | --- | --- |
 | `llm-council` | Sends independent agents to refute a claim before you report it, or to score competing options blind. `/llm-council` |
 | `claude-statusline` | The bar under the prompt: rate-limit meters, context %, git state. `/claude-statusline` |
+| `token-budget` | Caps one task to a share of the 5-hour usage window. `budget: 15%` in a prompt |
 
 ---
 
@@ -53,6 +54,7 @@ combination — all, one, or none:
 | --- | --- | --- |
 | `llm-council` | Adversarial multi-agent review that tries to refute a claim before you report it. Invoked with `/llm-council`. | One markdown file. No side effects. |
 | `claude-statusline` | Builds and installs the status bar under the prompt — rate-limit meters, context %, git branch. Invoked with `/claude-statusline`. | One folder. **Installing the skill does not change your terminal**; wiring up the bar is a separate opt-in in step 4. |
+| `token-budget` | Caps one task to a share of the 5-hour usage window when the prompt says `budget: 15%`. macOS / Linux / Git Bash only. | One folder, then step 5 adds two hooks and routes the status line through a capture script. Without step 5 it does nothing. |
 
 Offer **only the skills named in this table.** If the folder contains other directories, leave
 them alone and do not list them — some are personal and are not part of what this file installs.
@@ -156,7 +158,42 @@ windows the user is not typing in. Do not drop it.
    directory whose workspace-trust dialog has not been accepted — `statusLine` runs a shell
    command, so it needs the same trust as hooks.
 
-## Step 5 — Report
+## Step 5 — Only if `token-budget` was chosen: wire up the hooks
+
+Ask separately: *"Wire up the budget hooks now?"* Without them the skill cannot see usage.
+
+It needs `jq`, bash, and a Claude.ai Pro/Max login. On Windows without Git Bash, say it is not
+supported and stop here.
+
+1. Run `bash <claude-home>/skills/token-budget/assets/test.sh`. It must end `failed 0`.
+2. **Back up `settings.json` first**, then edit it as text, as in step 4.
+3. Route the status line through the capture step. If a `statusLine.command` already exists,
+   prefix it; keep everything after the pipe exactly as it was:
+
+   ```json
+   "command": "~/.claude/skills/token-budget/assets/budget.sh capture | <existing command>"
+   ```
+
+   If there is no status line, the capture step still needs one. Use `claude-statusline`
+   (step 4), or `budget.sh capture > /dev/null` for an empty bar.
+4. Add the two hooks. If a `hooks` key exists, append to its `UserPromptSubmit` and `PreToolUse`
+   arrays rather than replacing them:
+
+   ```json
+   "hooks": {
+     "UserPromptSubmit": [
+       { "hooks": [ { "type": "command", "command": "bash ~/.claude/skills/token-budget/assets/budget.sh hook-prompt", "timeout": 10 } ] }
+     ],
+     "PreToolUse": [
+       { "matcher": "", "hooks": [ { "type": "command", "command": "bash ~/.claude/skills/token-budget/assets/budget.sh hook-pre", "timeout": 10 } ] }
+     ]
+   }
+   ```
+
+5. Tell the user: write `budget: 15%` at the start or end of a prompt, `budget: off` to lift it,
+   `/token-budget check` to see where it stands. Settings reload on save; no restart needed.
+
+## Step 6 — Report
 
 Say plainly which skills were installed, where, whether the status line was wired up, and what
 the test sweep returned. If anything was skipped, say what and why.
@@ -166,7 +203,8 @@ the test sweep returned. If anything was skipped, say what and why.
 ## Uninstall
 
 Delete `<claude-home>/skills/<name>/`. For the status line, also remove the `statusLine` key from
-`settings.json` and delete the copied script. Nothing else is touched — no registry entries, no
+`settings.json` and delete the copied script. For `token-budget`, remove its two hook entries, take
+`budget.sh capture | ` off the front of the status-line command, and delete `<claude-home>/budget/`. Nothing else is touched — no registry entries, no
 PATH changes, no packages.
 
 ## Notes for whoever maintains this folder

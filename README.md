@@ -9,6 +9,7 @@ nothing needs an account, and nothing runs until you ask for it.
 | --- | --- | --- |
 | `llm-council` | Sends independent agents to refute a claim before you report it, or scores competing options blind. | `/llm-council` |
 | `claude-statusline` | The bar under the prompt: rate-limit meters, context %, git state. | `/claude-statusline` |
+| `token-budget` | Caps one task to a share of the 5-hour usage window, enforced by hooks. | `budget: 15%` in a prompt |
 
 ## llm-council
 
@@ -65,6 +66,29 @@ after the first API response — it falls back to the context meter rather than 
 charged; on a subscription nobody pays it. A test asserts it never appears. Add it back if you are
 on API billing.
 
+## token-budget
+
+Put `budget: 15%` at the start or end of a prompt and that task may use at most 15% of the 5-hour
+usage window, counted from that moment. At 23% used, it must be done by 38%. It is usage, not time.
+
+The model cannot see the window. Claude Code only passes `rate_limits` to the status line, so the
+status-line command runs through `budget.sh capture` first, which caches the numbers and passes the
+payload on unchanged. Two hooks read that cache:
+
+| Budget spent | What happens |
+| --- | --- |
+| 50% | one warning: decide whether the core deliverable still fits |
+| 80% | second warning; new subagents and workflows are denied |
+| 100% | every tool is blocked except a few light ones for twelve calls, enough to write a handoff |
+
+`budget: off` lifts it, `/token-budget check` shows where it stands. The directive only counts at the
+start or end of a prompt or on a line of its own, so pasted text such as "the grant budget: 15% went
+to travel" never sets a cap. Subagents share the session, so the cap covers them too.
+
+Needs a Claude.ai Pro/Max login, because that is the only auth that carries `rate_limits`. On API-key
+auth it records the cap and says it cannot enforce it. macOS, Linux, or Git Bash, plus `jq`.
+`bash token-budget/assets/test.sh` runs 82 checks against mock payloads.
+
 ## Install
 
 Clone this repo, open Claude Code in the folder, and tell it to read `INSTALL.md`. It works out the
@@ -91,6 +115,7 @@ Skills are picked up without restarting Claude Code.
 | --- | --- |
 | `llm-council` | Nothing. One markdown file. |
 | `claude-statusline` on Windows | PowerShell 5.1 |
+| `token-budget` | `jq`, bash, a Pro/Max login, and the status line plus two hooks wired up (INSTALL.md step 5) |
 | `claude-statusline` on macOS / Linux / Git Bash | `jq` |
 | Terminal-width fitting | Claude Code 2.1.153+. Below that the bar uses a fixed 100-column layout. |
 
@@ -100,8 +125,9 @@ it runs a shell command, so it needs the same trust as hooks.
 ## Uninstall
 
 Delete `<claude-home>/skills/<name>/`. For the status line, also remove the `statusLine` key from
-`settings.json` and delete the copied script. Nothing else is touched — no registry entries, no
-PATH changes, no packages.
+`settings.json` and delete the copied script. For `token-budget`, remove its two hook entries, take
+`budget.sh capture | ` off the front of the status-line command, and delete `<claude-home>/budget/`.
+Nothing else is touched — no registry entries, no PATH changes, no packages.
 
 ## Notes for whoever maintains this
 
