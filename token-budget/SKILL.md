@@ -7,7 +7,9 @@ description: Use when the user caps a task to a share of their 5-hour usage wind
 
 *ALVI Skills — a Claude Code skill toolchain collected by Alvi to make the work easier.*
 
-A budget caps how much of the 5-hour usage window one task may consume, counted from the moment it is set. "budget: 15%" at 23% used means stop by 38%. It is usage, not time: a council call can take 10% in two minutes.
+A budget caps how much of the 5-hour usage window one task may consume, counted from the moment it is set. "budget: 15%" at 23% used means stop by 38%. It is a ceiling: a task that needs 6% finishes at 6%. It is usage, not time: a council call can take 10% in two minutes.
+
+Two facts shape the number. Usage is measured for the whole account, so other Claude windows running at the same time spend from this budget too. And a budget never exceeds what the window has left: "budget: 30%" at 88% used becomes 12%.
 
 You cannot see the window yourself. The status line caches it and the hooks read that cache. The only measurement is:
 
@@ -19,7 +21,7 @@ Counting your own reads and edits is a guess, not a measurement.
 
 ## Setting the cap
 
-The prompt hook sets the cap when the user writes `budget: 15%` or `/token-budget 15` at the start of the prompt, at its end, or on a line of its own. `budget: off` lifts it. `/token-budget check` prints the status line.
+The prompt hook sets the cap when the user writes `budget: 15%` or `/token-budget 15` at the start of the prompt, at its end, or on a line of its own. Text the user pasted is ignored. `budget: off` lifts it. `/token-budget check` prints the status line. Each Claude window has its own budget.
 
 If the user asked for a cap in other words and no `[token-budget] budget set` line appeared in context, set it yourself before any other tool call:
 

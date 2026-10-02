@@ -14,7 +14,10 @@
 set -u
 DIR="$HOME/.claude/budget"
 USAGE="$DIR/usage.json"
-ACTIVE="$DIR/active.json"
+# One budget file per session, so a budget set in one Claude window never
+# replaces another's. Session ids are uuids; anything else is squashed.
+active_for() { printf '%s/active-%s.json' "$DIR" "$(printf '%s' "${1:-none}" | tr -c 'A-Za-z0-9-' '_')"; }
+ACTIVE=$(active_for "${CLAUDE_CODE_SESSION_ID:-}")
 WARN_SOFT=50       # % of the cap: first warning
 WARN_HARD=80       # % of the cap: second warning, no new subagents/workflows
 GRACE_CALLS=12     # tool calls allowed after the cap, light tools only
@@ -97,7 +100,7 @@ sync_active() {
         # set before a fresh snapshot existed: start counting at the first one after set_at
         [ "$(usage_field '.ts')" -ge "$(active_field '.set_at')" ] && [ "$reset" -gt "$(now)" ] || return 1
         write_json "$ACTIVE" "$(jq -c --argjson s "$(usage_field '.used')" --argjson r "$reset" \
-            '.start=$s | .resets_at=$r | del(.unenforced)' "$ACTIVE")"
+            '.start=$s | .last_seen=$s | .resets_at=$r | .eff=([.cap, 100 - $s, 1] | sort | .[1]) | del(.unenforced)' "$ACTIVE")"
         b_reset=$reset
     fi
     if [ "$(same_window "$reset" "$b_reset")" = true ]; then
@@ -111,10 +114,13 @@ sync_active() {
     fi
 }
 
+# eff is the cap actually usable: min(cap, what the window had left at the start)
 spent()      { jq -r '(.carry + .last_seen - .start) * 10 | round / 10' "$ACTIVE"; }
 cap()        { active_field '.cap'; }
-pct_of_cap() { jq -r '((.carry + .last_seen - .start) * 100 / .cap + 1e-9) | floor' "$ACTIVE"; }
-remaining()  { jq -r '(.cap - (.carry + .last_seen - .start)) * 10 | round / 10' "$ACTIVE"; }
+eff()        { active_field '(.eff // .cap) * 10 | round / 10'; }
+pct_of_cap() { jq -r '((.carry + .last_seen - .start) * 100 / (.eff // .cap) + 1e-9) | floor' "$ACTIVE"; }
+remaining()  { jq -r '((.eff // .cap) - (.carry + .last_seen - .start)) * 10 | round / 10' "$ACTIVE"; }
+cap_label()  { if [ "$(eff)" = "$(cap)" ]; then printf '%s%%' "$(cap)"; else printf '%s%% (only %s%% was left in the window)' "$(cap)" "$(eff)"; fi; }
 
 fmt_reset() {
     local r secs; r=$(usage_field '.resets_at'); secs=$(( r - $(now) ))
@@ -126,8 +132,8 @@ status_line() {
     sync_active || { echo "budget expired: the window it was set in has passed"; return; }
     local age stale=""; age=$(usage_age)
     [ "$age" -gt "$STALE_AFTER" ] && stale=" (no new usage data in that time)"
-    printf 'budget: %s%% of window | spent %s%% | left %s%% | window %s%% used, resets in %s | snapshot %ss old%s\n' \
-        "$(cap)" "$(spent)" "$(remaining)" "$(usage_field '.used')" "$(fmt_reset)" "$age" "$stale"
+    printf 'budget: %s of window | spent %s%% | left %s%% | window %s%% used, resets in %s | snapshot %ss old%s\n' \
+        "$(cap_label)" "$(spent)" "$(remaining)" "$(usage_field '.used')" "$(fmt_reset)" "$age" "$stale"
 }
 
 # ---- set / check / off -----------------------------------------------------
@@ -144,15 +150,17 @@ do_set() {  # do_set <pct> <session_id>
     fi
     local cur reset; cur=$(usage_field '.used'); reset=$(usage_field '.resets_at')
     write_json "$ACTIVE" "$(jq -nc --argjson p "$pct" --argjson c "$cur" --argjson r "$reset" --arg s "$sid" \
-        '{cap:$p, start:$c, last_seen:$c, carry:0, resets_at:$r, session_id:$s, set_at:now|floor, warned:[], grace_used:0, denied:0}')"
-    local ceiling; ceiling=$(jq -n "[$cur + $pct, 100] | min")
-    echo "budget set: ${pct}% of the 5-hour window for this task. Window is at ${cur}% now, so stop by ${ceiling}%. Resets in $(fmt_reset)."
+        '{cap:$p, eff:([$p, 100 - $c, 1] | sort | .[1]), start:$c, last_seen:$c, carry:0, resets_at:$r, session_id:$s, set_at:now|floor, warned:[], grace_used:0, denied:0}')"
+    local e; e=$(eff)
+    if [ "$e" = "$pct" ]; then
+        echo "budget set: ${pct}% of the 5-hour window for this task. Window is at ${cur}% now, so stop by $(jq -n "$cur + $pct")%. Resets in $(fmt_reset). Usage from other Claude windows counts too."
+    else
+        echo "budget set: ${pct}% asked, but the window is at ${cur}% and has only ${e}% left, so the budget is ${e}%. Resets in $(fmt_reset). Usage from other Claude windows counts too."
+    fi
 }
 
 do_check() {
     have_active || { echo "no budget set"; return; }
-    local me="${CLAUDE_CODE_SESSION_ID:-}"
-    [ -n "$me" ] && [ "$(active_field '.session_id')" != "$me" ] && echo "note: this budget was set in another session and is not enforced here"
     if [ "$(active_field '.unenforced // false')" = true ] && ! sync_active; then
         echo "budget $(cap)% set, waiting for a fresh usage snapshot"; return
     fi
@@ -161,7 +169,9 @@ do_check() {
 }
 
 case "${1:-}" in
-    set)   do_set "${2:-}" "${3:-${CLAUDE_CODE_SESSION_ID:-}}"; exit 0 ;;
+    set)   sid="${3:-${CLAUDE_CODE_SESSION_ID:-}}"
+           [ -z "$sid" ] && { echo "budget not set: no session id (run it from inside Claude Code)"; exit 0; }
+           ACTIVE=$(active_for "$sid"); do_set "${2:-}" "$sid"; exit 0 ;;
     off)   lock; rm -f "$ACTIVE"; unlock; echo "budget cleared"; exit 0 ;;
     check) do_check; exit 0 ;;
 esac
@@ -170,6 +180,7 @@ esac
 hook_in=$(cat)
 sid=$(printf '%s' "$hook_in" | jq -r '.session_id // ""' 2>/dev/null)
 [ -z "$sid" ] && exit 0
+ACTIVE=$(active_for "$sid")
 
 if [ "${1:-}" = hook-prompt ]; then
     prompt=$(printf '%s' "$hook_in" | jq -r '.prompt // ""' 2>/dev/null)
@@ -177,6 +188,12 @@ if [ "${1:-}" = hook-prompt ]; then
     # directive only counts at the start of the prompt, at its end, or on a
     # line of its own. "my grant budget: 15% went to travel" never matches.
     case "$prompt" in *"[Subagent hand-back]"*|*"<task-notification>"*) exit 0 ;; esac
+    # Pasted text is quoted material, never a directive.
+    case "$prompt" in *"<pasted_content"*)
+        prompt=$(printf '%s' "$prompt" | perl -0pe 's/<pasted_content\b[^>]*>.*?<\/pasted_content\b[^>]*>//gs') ;;
+    esac
+    # budgets from sessions nobody has touched in two windows are dead weight
+    find "$DIR" -name 'active-*.json' -mmin +600 -delete 2>/dev/null
     directive=$(printf '%s\n' "$prompt" | tr 'A-Z' 'a-z' | awk -v D='(budget|/token-budget)[ :=]*(of )?(off|check|status|[0-9]+ *(%|percent)?)|[0-9]+ *(%|percent) budget' '
         { gsub(/^[ \t]+|[ \t.!,]+$/, ""); sub(/,?[ \t]+(please|pls|thanks|thank you)$/, "") }
         NR == 1 && match($0, "^(" D ")")      { print substr($0, 1, RLENGTH); exit }

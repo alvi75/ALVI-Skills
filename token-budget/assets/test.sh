@@ -2,12 +2,12 @@
 # Runs budget.sh against mock payloads in a throwaway HOME.  bash test.sh
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd); B="$HERE/budget.sh"
-T=$(mktemp -d); export HOME="$T"; mkdir -p "$HOME/.claude"; unset CLAUDE_CODE_SESSION_ID
+T=$(mktemp -d); export HOME="$T"; mkdir -p "$HOME/.claude"; export CLAUDE_CODE_SESSION_ID=s1
 pass=0; fail=0
 ok()   { pass=$((pass+1)); }
 bad()  { fail=$((fail+1)); echo "FAIL: $1"; }
 check(){ if eval "$2"; then ok; else bad "$1"; fi; }
-A="$HOME/.claude/budget/active.json"; U="$HOME/.claude/budget/usage.json"
+A="$HOME/.claude/budget/active-s1.json"; U="$HOME/.claude/budget/usage.json"
 
 RESET=$(( $(date +%s) + 4000 ))
 payload(){ # payload <used> [session] [resets_at]
@@ -73,6 +73,7 @@ out=$(prompt s1 "hello"); check "no reminder when inactive" '[ -z "$out" ]'
 # set from the Bash tool uses the env session id
 reset_state; cap 23 sX
 CLAUDE_CODE_SESSION_ID=s1 bash "$B" set 10 >/dev/null; check "set uses env session id" '[ "$(jq -r .session_id "$A")" = s1 ]'
+out=$(CLAUDE_CODE_SESSION_ID= bash "$B" set 10); check "set with no session id refuses" 'printf "%s" "$out" | grep -q "no session id"'
 out=$(bash "$B" set 0); check "set 0 rejected" 'printf "%s" "$out" | grep -q "not set"'
 
 # ladder: cap 10 from 23
@@ -104,8 +105,8 @@ check "float display rounded" 'bash "$B" check | grep -q "spent 4.6% | left 5.4%
 
 # window roll with NO hook call between the last snapshot and the reset
 reset_state; cap 95; prompt s1 "budget: 10%" >/dev/null; cap 98
-cap 4 s1 $((RESET+18000)); check "roll carries 3 without a sync" 'bash "$B" check | grep -q "spent 7% | left 3%"'
-cap 6 s1 $((RESET+18000)); check "second post-roll snapshot: no double carry" 'bash "$B" check | grep -q "spent 9% | left 1%"'
+cap 4 s1 $((RESET+18000)); check "roll carries 3 without a sync" 'bash "$B" check | grep -q "spent 7% | left -2%"'
+cap 6 s1 $((RESET+18000)); check "second post-roll snapshot: no double carry" 'bash "$B" check | grep -q "spent 9% | left -4%"'
 # jitter on resets_at is not a roll
 reset_state; cap 16; prompt s1 "budget: 10%" >/dev/null; cap 20; cap 20 s1 $((RESET+1))
 check "1s jitter is same window" 'bash "$B" check | grep -q "spent 4% | left 6%"'
@@ -139,9 +140,42 @@ cap 40; pre s1 Bash >/dev/null; cap 44; check "counts from first fresh snapshot"
 reset_state; cap 23; jq '.ts = 1000' "$U" > "$U.t" && mv "$U.t" "$U"; cap 23
 check "unchanged data keeps old ts" '[ "$(jq .ts "$U")" = 1000 ]'
 cap 24; check "changed data refreshes ts" '[ "$(jq .ts "$U")" != 1000 ]'
-# check from another session says so
-reset_state; cap 23; prompt s1 "budget: 10%" >/dev/null
-check "check in another session warns" 'CLAUDE_CODE_SESSION_ID=s2 bash "$B" check | grep -q "another session"'
+# one budget per session
+reset_state; cap 23; prompt s1 "budget: 10%" >/dev/null; prompt s2 "budget: 20%" >/dev/null
+check "two sessions keep two budgets" '[ "$(jq .cap "$A")" = 10 ] && [ "$(jq .cap "$HOME/.claude/budget/active-s2.json")" = 20 ]'
+prompt s2 "budget: off" >/dev/null; check "off in s2 leaves s1" '[ -e "$A" ] && [ ! -e "$HOME/.claude/budget/active-s2.json" ]'
+check "check from s2 sees no budget" '[ "$(CLAUDE_CODE_SESSION_ID=s2 bash "$B" check)" = "no budget set" ]'
+touch -t 202001010000 "$A"; prompt s2 "hello" >/dev/null; check "stale session file swept" '[ ! -e "$A" ]'
+# sid with odd characters cannot escape the budget dir
+prompt "../../x" "budget: 10%" >/dev/null; check "odd session id stays in dir" '[ -e "$HOME/.claude/budget/active-______x.json" ] && [ ! -e "$HOME/x.json" ]'
+
+# pasted blocks are quoted material
+reset_state; cap 23
+prompt s1 "these are the examples:
+<pasted_content id=\"d1\">
+refactor the auth module, budget: 15%
+/token-budget 15
+budget: off
+</pasted_content id=\"d1\">
+let me know when it is ready" >/dev/null; check "pasted examples set nothing" '[ ! -e "$A" ]'
+prompt s1 "fix it with this note
+<pasted_content id=\"d2\">
+budget: off
+</pasted_content id=\"d2\">
+budget: 5%" >/dev/null; check "typed directive after a paste still counts" '[ "$(jq .cap "$A")" = 5 ]'
+
+# budget clamped to what the window has left
+reset_state; cap 88; out=$(prompt s1 "budget: 30%")
+check "clamp message" 'printf "%s" "$out" | grep -q "only 12% left, so the budget is 12%"'
+check "clamp stored" '[ "$(jq .eff "$A")" = 12 ] && [ "$(jq .cap "$A")" = 30 ]'
+cap 94; out=$(pre s1 Bash); check "clamped: 50% warning at 6 spent" 'printf "%s" "$out" | grep -q "50% of the budget"'
+cap 100; pre s1 Bash 2>/dev/null; check "clamped: blocked at full window" '[ $? -eq 2 ]'
+check "clamped check label" 'bash "$B" check | grep -q "30% (only 12% was left in the window)"'
+reset_state; cap 99.6; prompt s1 "budget: 10%" >/dev/null; check "window nearly full: eff floor 1" '[ "$(jq .eff "$A")" = 1 ]'
+reset_state; cap 23; out=$(prompt s1 "budget: 10%"); check "set message mentions other windows" 'printf "%s" "$out" | grep -q "other Claude windows"'
+# clamp also applies when counting starts late
+reset_state; out=$(prompt s1 "budget: 40%"); cap 80; pre s1 Bash >/dev/null
+check "late start clamps too" '[ "$(jq .eff "$A")" = 20 ]'
 
 # malformed state never blocks and never prints garbage
 reset_state; cap 23; prompt s1 "budget: 10%" >/dev/null

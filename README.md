@@ -82,12 +82,17 @@ payload on unchanged. Two hooks read that cache:
 | 100% | every tool is blocked except a few light ones for twelve calls, enough to write a handoff |
 
 `budget: off` lifts it, `/token-budget check` shows where it stands. The directive only counts at the
-start or end of a prompt or on a line of its own, so pasted text such as "the grant budget: 15% went
-to travel" never sets a cap. Subagents share the session, so the cap covers them too.
+start or end of a prompt or on a line of its own, and pasted blocks are skipped, so text such as "the
+grant budget: 15% went to travel" never sets a cap.
+
+It is a ceiling, not a target: a task that needs 6% under a 15% budget just finishes. Each Claude
+window keeps its own budget, and subagents share their window's. Usage is reported for the whole
+account, though, so other windows running at the same time spend from it too. A budget never
+exceeds what the window has left: "budget: 30%" at 88% used becomes 12%, so the warnings still fire.
 
 Needs a Claude.ai Pro/Max login, because that is the only auth that carries `rate_limits`. On API-key
 auth it records the cap and says it cannot enforce it. macOS, Linux, or Git Bash, plus `jq`.
-`bash token-budget/assets/test.sh` runs 82 checks against mock payloads.
+`bash token-budget/assets/test.sh` runs 97 checks against mock payloads.
 
 ## Install
 
