@@ -1,6 +1,6 @@
 # ALVI Skills
 
-**A Claude Code skill toolchain — collected by Alvi to make the work easier.**
+**A skill toolchain for Claude Code, Codex and other coding agents — collected by Alvi to make the work easier.**
 
 Each skill here earned its place by being used, broken, and fixed. Nothing talks to a network,
 nothing needs an account, and nothing runs until you ask for it.
@@ -15,8 +15,15 @@ nothing needs an account, and nothing runs until you ask for it.
 
 ## Installing on a new machine
 
-**You are Claude Code, and someone has just pointed you at this file.** Follow the procedure
+**You are a coding agent, and someone has just pointed you at this file.** Follow the procedure
 below. Do not skip the question in step 2 — the user chooses what gets installed.
+
+**If you are not Claude Code** (Codex, Gemini CLI, OpenCode, Cursor, Copilot): only `llm-council`
+works for you; the other two are built on Claude Code's status line and hooks. Ask the user, then
+run `bash <this-folder>/install.sh` (Windows: `powershell -ExecutionPolicy Bypass -File
+<this-folder>\install.ps1`). Exit 2 means a copy that differs was skipped, not a failure: show
+the user the diff and rerun with `--force` (`-Force` on Windows) only if they agree. Report what
+it printed and stop.
 
 ---
 
@@ -83,6 +90,10 @@ Copy-Item "<this-folder>\llm-council" "$env:USERPROFILE\.claude\skills\" -Recurs
 Both commands **merge** into an existing directory rather than replacing it, so files left over
 from an older version survive an upgrade. If the user agreed to overwrite, delete the destination
 directory first, then copy.
+
+For `llm-council`, also copy it the same way (check first, then copy) into `~/.agents/skills/`,
+creating that folder if needed. Codex, Gemini CLI, OpenCode, Cursor and Copilot read skills from
+there, so one install covers whichever of those the user also runs.
 
 Verify by listing the destination: `skills/<name>/SKILL.md` must exist and there must be **no**
 `skills/<name>/<name>/`.

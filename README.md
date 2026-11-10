@@ -1,13 +1,13 @@
 # ALVI Skills
 
-*A Claude Code skill toolchain — collected by Alvi to make the work easier.*
+*A skill toolchain for Claude Code, Codex and other coding agents — collected by Alvi to make the work easier.*
 
 Each skill here earned its place by being used, broken, and fixed. Nothing talks to a network,
 nothing needs an account, and nothing runs until you ask for it.
 
 | Skill | What it does | Invoke |
 | --- | --- | --- |
-| `llm-council` | Sends independent agents to refute a claim before you report it, or scores competing options blind. | `/llm-council` |
+| `llm-council` | Sends independent agents to refute a claim before you report it, or scores competing options blind. Any agent. | `/llm-council`, `$llm-council` in Codex |
 | `claude-statusline` | The bar under the prompt: rate-limit meters, context %, git state. | `/claude-statusline` |
 | `token-budget` | Caps one task to a share of the 5-hour usage window, enforced by hooks. | `budget: 15%` in a prompt |
 
@@ -118,11 +118,34 @@ Skills are picked up without restarting Claude Code.
 
 | | Needs |
 | --- | --- |
-| `llm-council` | Nothing. One markdown file. |
+| `llm-council` | One markdown file, and an agent that can start subagents |
 | `claude-statusline` on Windows | PowerShell 5.1 |
 | `token-budget` | `jq`, bash, a Pro/Max login, and the status line plus two hooks wired up (INSTALL.md step 5) |
 | `claude-statusline` on macOS / Linux / Git Bash | `jq` |
 | Terminal-width fitting | Claude Code 2.1.153+. Below that the bar uses a fixed 100-column layout. |
+
+### llm-council in Codex, Gemini CLI, OpenCode, Cursor or Copilot
+
+`llm-council` is the one skill here that is not tied to Claude Code. One command puts it in the two
+folders that every one of these agents reads from:
+
+```bash
+bash install.sh                                        # macOS / Linux / Git Bash
+powershell -ExecutionPolicy Bypass -File install.ps1   # Windows
+```
+
+| Folder | Read by |
+| --- | --- |
+| `~/.claude/skills/` | Claude Code (also OpenCode and Cursor) |
+| `~/.agents/skills/` | Codex, Gemini CLI, OpenCode, Cursor, GitHub Copilot |
+
+A copy that differs from this repo is skipped, not overwritten, and the script exits 2;
+`--force` (`-Force` on Windows) replaces it. If an older copy sits in `~/.codex/skills/llm-council`,
+the script says so: delete it, or Codex may list the skill twice. `bash test-install.sh` runs 19
+checks against a throwaway home folder.
+
+Call it with `/llm-council` in Claude Code and `$llm-council` in Codex; in the others, ask for it by
+name. It needs a subagent tool. Without one it says a council cannot run rather than faking one.
 
 The status line stays blank in any directory whose workspace-trust dialog has not been accepted —
 it runs a shell command, so it needs the same trust as hooks.
